@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if snapctl get external-interface >/dev/null 2>&1; then
+  "$SNAP"/files/bin/bridge-setup apply-from-snap-config || true
+fi

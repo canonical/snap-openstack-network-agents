@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+"$SNAP"/files/bin/bridge-setup apply-from-snap-config || exit 0

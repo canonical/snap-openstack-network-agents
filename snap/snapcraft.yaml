@@ -1,0 +1,47 @@
+name: openstack-network-agents
+summary: OVS provider-bridge helper for OpenStack Network role
+description: |
+  Provides a helper to configure a provider bridge and OVN physnet mapping.
+  This snap is meant to be driven by a subordinate charm and does not ship
+  neutron-ovn-metadata-agent.
+base: core24
+version: "0.1"
+license: Apache-2.0
+grade: devel
+confinement: strict
+
+plugs:
+  network-control:
+    interface: network-control
+  network:
+    interface: network
+  ovn-chassis:
+    interface: content
+    target: $SNAP_DATA/microovn/chassis
+
+apps:
+  bridge-setup:
+    command: files/bin/bridge-setup
+    plugs:
+      - network
+      - network-control
+      - ovn-chassis
+
+parts:
+  agents:
+    plugin: dump
+    source: .
+    stage-packages:
+      - iproute2
+      - openvswitch-switch
+    override-build: |
+      set -euxo pipefail
+      craftctl default
+      install -D -m755 "$CRAFT_PROJECT_DIR/snap/files/bin/bridge-setup" \
+                       "$CRAFT_PART_INSTALL/files/bin/bridge-setup"
+
+hooks:
+  install:
+    plugs: [network, network-control, ovn-chassis]
+  configure:
+    plugs: [network, network-control, ovn-chassis]
