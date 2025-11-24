@@ -1,35 +1,46 @@
 # OpenStack Network Agents (snap)
 
-This snap provides the `neutron-ovn-metadata-agent` and helpers for Sunbeam
-**network-role** nodes. It is designed to be co-located with `microovn`.
+This snap provides helpers for Sunbeam **network-role** nodes. It is designed to be co-located with `microovn`.
+
+## Features
+
+- **Fetch NICs**: List network interfaces available for OVS/OVN.
+- **Configure OVS Bridge**: Configure bridge mappings, MAC chassis binding, and other OVS settings.
 
 ## Install
 
 ```bash
-sudo snap install openstack-network-agents --classic
+sudo snap install openstack-network-agents
 ```
 
 **NOTE:** Classic confinement is required to access `/var/run/openvswitch/db.sock`.
 
-## Configure
+## Usage
 
-The snap can configure the provider bridge and physnet mapping:
+The snap exposes the `openstack-network-agents` command with several subcommands:
+
+### List NICs
+
+List candidate NICs for OVS/OVN use:
+
+```bash
+openstack-network-agents list-nics
+```
+
+### Configure Bridge
+
+Configure the provider bridge and physnet mapping based on snap configuration:
 
 ```bash
 sudo snap set openstack-network-agents \
-  external-interface=enp6s0 \
-  bridge-name=br-ex \
-  physnet-name=physnet1
+  network.bridge-mapping=br-ex:physnet1:enp6s0
+
 ```
 
-Then (re)start the agent:
+### Show Bridge Setup
+
+Display the current bridge configuration:
 
 ```bash
-sudo snap start openstack-network-agents.metadata-agent
-```
-
-## Service
-
-```bash
-sudo snap services openstack-network-agents
+openstack-network-agents show-bridge-setup
 ```

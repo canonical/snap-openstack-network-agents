@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2025 - Canonical Ltd
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = [
+    "setuptools",
+    "setuptools-scm",
+    "pbr>=2.0.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openstack-network-agents"
+version = "2025.1"
+requires-python = "~=3.12.0"
+license-files = ["LICENSE"]
+description = "Network agents component of OpenStack"
+readme = "README.md"
+authors = [{ name = "Canonical", email = "openstack-charmers@lists.launchpad.net" }]
+classifiers = [
+    "Environment :: OpenStack",
+    "Environment :: Web Environment",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operation System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "click>=8.3.1",
+    "prettytable>=3.17.0",
+    "pydantic>=2,<3",
+    "pyroute2==0.7.11",
+    "snap-helpers @ git+https://github.com/albertodonato/snap-helpers@46803aa9d52cc0bb24f76df878dd1010fc08e6a0",
+]
+
+[project.optional-dependencies]
+dev= [
+    "coverage[toml]",
+    "pytest",
+    "pytest-mock",
+    "ruff",
+    "mypy"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/canonical/snap-openstack-network-agents"
+"Bug Reports" = "https://github.com/canonical/snap-openstack-network-agents/issues"
+
+[project.scripts]
+openstack-network-agents = "openstack_network_agents.cli.main:main"
+
+[project.entry-points.'snaphelpers.hooks']
+configure = "openstack_network_agents.hooks.configure:hook"
+install = "openstack_network_agents.hooks.install:hook"
+
+[tool.setuptools]
+packages = ["openstack_network_agents"]
+
+# Testing tools configuration
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+log_cli_level = "INFO"
+
+# Formatting tools configuration
+[tool.black]
+line-length = 99
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+
+# Linting tools configuration
+[tool.flake8]
+max-line-length = 99
+max-doc-length = 99
+max-complexity = 10
+exclude = [".git", "__pycache__", ".tox", "build", "dist", "*.egg_info", "venv", ".venv"]
+select = ["E", "W", "F", "C", "N", "R", "D", "H"]
+# Ignore W503, E501 because using black creates errors with this
+# Ignore D107 Missing docstring in __init__
+ignore = ["W503", "E501", "D107"]
+# D100, D101, D102, D103: Ignore missing docstrings in tests
+per-file-ignores = [
+    "tests/*:D100,D101,D102,D103,D104",
+    "setup.py:D100",
+    "openstack_network_agents/*:D100",
+    "openstack_network_agents/__init__.py:D104,C801"
+]
+docstring-convention = "google"
+# Check for properly formatted copyright header in each file
+copyright-check = "True"
+copyright-author = "Canonical Ltd."
+copyright-regexp = "(?i)# SPDX-FileCopyrightText:\\s\\d{4}(-(\\d{4}|present))*"
+#copyright-regexp = "Copyright\\s\\d{4}([-,]\\d{4})*\\s+%(author)s"
+
+[[tool.mypy.overrides]]
+module = ["pyroute2", "pyroute2.*"]
+follow_untyped_imports = true

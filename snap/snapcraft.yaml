@@ -5,10 +5,20 @@ description: |
   This snap is meant to be driven by a subordinate charm and does not ship
   neutron-ovn-metadata-agent.
 base: core24
-version: "0.1"
+version: "2025.1"
 license: Apache-2.0
 grade: devel
 confinement: strict
+
+package-repositories:
+  - type: apt
+    cloud: epoxy
+    priority: always
+
+platforms:
+  amd64:
+  arm64:
+  s390x:
 
 plugs:
   network-control:
@@ -20,25 +30,33 @@ plugs:
     target: $SNAP_DATA/microovn/chassis
 
 apps:
-  bridge-setup:
-    command: files/bin/bridge-setup
+  openstack-network-agents:
+    environment:
+      # Ensure site packages are loaded first
+      PYTHONPATH: $SNAP/usr/lib/python3.12:$SNAP/usr/lib/python3.12/site-packages:$SNAP/lib/python3.12:$SNAP/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
+    command: bin/openstack-network-agents
     plugs:
       - network
       - network-control
       - ovn-chassis
 
 parts:
-  agents:
-    plugin: dump
+  openstack-network-agents:
+    plugin: python
     source: .
+    build-snaps: [astral-uv]
+    build-packages:
+      - git
+      - cargo
+      - rustc
     stage-packages:
-      - iproute2
       - openvswitch-switch
+    python-requirements:
+      - requirements.txt
     override-build: |
-      set -euxo pipefail
+      uv export --frozen --no-hashes --format=requirements-txt -o requirements.txt
       craftctl default
-      install -D -m755 "$CRAFT_PROJECT_DIR/snap/files/bin/bridge-setup" \
-                       "$CRAFT_PART_INSTALL/files/bin/bridge-setup"
+      snap-helpers write-hooks
 
 hooks:
   install:
