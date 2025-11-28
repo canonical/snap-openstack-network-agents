@@ -5,15 +5,10 @@ description: |
   This snap is meant to be driven by a subordinate charm and does not ship
   neutron-ovn-metadata-agent.
 base: core24
-version: "2025.1"
+version: "2024.1"
 license: Apache-2.0
 grade: devel
 confinement: strict
-
-package-repositories:
-  - type: apt
-    cloud: epoxy
-    priority: always
 
 platforms:
   amd64:
