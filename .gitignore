@@ -1,0 +1,8 @@
+*.snap
+**/__pycache__
+.tox
+.coverage
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
