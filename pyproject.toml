@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openstack-network-agents"
 version = "2025.1"
-requires-python = "~=3.12.0"
+requires-python = "~=3.14.4"
 license-files = ["LICENSE"]
 description = "Network agents component of OpenStack"
 readme = "README.md"
