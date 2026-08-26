@@ -7,7 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from openstack_network_agents.core.bridge_datapath import OVSCommandError
 from openstack_network_agents.core.external_networking import (
+    _disable_chassis_as_gateway,
+    _enable_chassis_as_gateway,
     _get_unmanaged_interfaces_on_bridge,
     _is_managed_port,
     configure_ovn_encap_ip,
@@ -89,6 +92,84 @@ def mock_external_networking_deps():
             "add_iptable_postrouting_rule": mock_add_iptable_postrouting_rule,
             "delete_iptable_postrouting_rule": mock_delete_iptable_postrouting_rule,
         }
+
+
+class TestEnableDisableChassisAsGateway:
+    """Tests for _enable_chassis_as_gateway and _disable_chassis_as_gateway.
+
+    Regression coverage for the DPU card-serial-number being clobbered:
+    MicroOVN writes external_ids:ovn-cms-options=card-serial-number=<serial>
+    on DPU chassis, and enabling/disabling the gateway option must merge
+    with that value instead of overwriting or removing the whole key.
+    """
+
+    def test_enable_preserves_existing_cms_options(self, mock_ovs_cli):
+        """Enabling chassis-as-gw must not drop an existing card-serial-number."""
+        mock_ovs_cli.vsctl.return_value = '"card-serial-number=53FV4AF0066"'
+
+        _enable_chassis_as_gateway(mock_ovs_cli)
+
+        mock_ovs_cli.set.assert_called_once_with(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-cms-options": "card-serial-number=53FV4AF0066,enable-chassis-as-gw"},
+        )
+
+    def test_enable_when_no_existing_options(self, mock_ovs_cli):
+        """With no pre-existing ovn-cms-options key, only enable-chassis-as-gw is set."""
+        mock_ovs_cli.vsctl.side_effect = OVSCommandError('no key "ovn-cms-options"')
+
+        _enable_chassis_as_gateway(mock_ovs_cli)
+
+        mock_ovs_cli.set.assert_called_once_with(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-cms-options": "enable-chassis-as-gw"},
+        )
+
+    def test_enable_is_idempotent(self, mock_ovs_cli):
+        """Re-enabling when already present does not duplicate the token."""
+        mock_ovs_cli.vsctl.return_value = (
+            '"enable-chassis-as-gw,card-serial-number=53FV4AF0066"'
+        )
+
+        _enable_chassis_as_gateway(mock_ovs_cli)
+
+        mock_ovs_cli.set.assert_called_once_with(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-cms-options": "card-serial-number=53FV4AF0066,enable-chassis-as-gw"},
+        )
+
+    def test_disable_preserves_other_options(self, mock_ovs_cli):
+        """Disabling chassis-as-gw must preserve an existing card-serial-number."""
+        mock_ovs_cli.vsctl.return_value = (
+            '"enable-chassis-as-gw,card-serial-number=53FV4AF0066"'
+        )
+
+        _disable_chassis_as_gateway(mock_ovs_cli)
+
+        mock_ovs_cli.set.assert_called_once_with(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-cms-options": "card-serial-number=53FV4AF0066"},
+        )
+        mock_ovs_cli.remove.assert_not_called()
+
+    def test_disable_removes_key_when_nothing_left(self, mock_ovs_cli):
+        """Disabling with no other options removes the ovn-cms-options key entirely."""
+        mock_ovs_cli.vsctl.return_value = '"enable-chassis-as-gw"'
+
+        _disable_chassis_as_gateway(mock_ovs_cli)
+
+        mock_ovs_cli.remove.assert_called_once_with(
+            "open", ".", "external_ids", "ovn-cms-options"
+        )
+        mock_ovs_cli.set.assert_not_called()
 
 
 class TestConfigureOvnEncapIp:
@@ -473,11 +554,15 @@ class TestConfigureOvnExternalNetworking:
         call_args = mock_ovs_cli.set.call_args_list
         set_mapping_call = None
         for call_obj in call_args:
-            args, kwargs = call_obj
-            if len(args) >= 4 and args[0] == "open" and args[1] == ".":
-                if "ovn-bridge-mappings" in str(args[3]):
-                    set_mapping_call = args[3].get("ovn-bridge-mappings", "")
-                    break
+            args, _kwargs = call_obj
+            if (
+                len(args) >= 4
+                and args[0] == "open"
+                and args[1] == "."
+                and "ovn-bridge-mappings" in str(args[3])
+            ):
+                set_mapping_call = args[3].get("ovn-bridge-mappings", "")
+                break
 
         assert set_mapping_call is not None
         assert "physnet1:br-ex" in set_mapping_call

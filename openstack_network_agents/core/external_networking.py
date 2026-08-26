@@ -13,6 +13,8 @@ from pyroute2.netlink.exceptions import NetlinkError
 
 from openstack_network_agents.core.bridge_datapath import (
     OVSCli,
+    OVSCommandError,
+    _normalize_ovs_vsctl_value,
     detect_current_mappings,
     resolve_bridge_mappings,
     resolve_ovs_changes,
@@ -32,10 +34,10 @@ def _del_interface_from_bridge(
     :param external_nic: Name of nic.
     """
     if external_nic in ovs_cli.list_bridge_interfaces(external_bridge):
-        logging.warning(f"Removing interface {external_nic} from {external_bridge}")
+        logger.warning(f"Removing interface {external_nic} from {external_bridge}")
         ovs_cli.del_port(external_bridge, external_nic)
     else:
-        logging.warning(f"Interface {external_nic} not connected to {external_bridge}")
+        logger.warning(f"Interface {external_nic} not connected to {external_bridge}")
 
 
 def _get_external_ports_on_bridge(ovs_cli: OVSCli, bridge: str) -> list:
@@ -104,11 +106,11 @@ def _add_interface_to_bridge(
     :param external_nic: Name of nic.
     """
     if external_nic in ovs_cli.list_bridge_interfaces(external_bridge):
-        logging.warning(
+        logger.warning(
             f"Interface {external_nic} already connected to {external_bridge}"
         )
     else:
-        logging.warning(f"Adding interface {external_nic} to {external_bridge}")
+        logger.warning(f"Adding interface {external_nic} to {external_bridge}")
         ovs_cli.add_port(
             external_bridge,
             external_nic,
@@ -133,13 +135,13 @@ def _wait_for_interface(interface: str) -> None:
     :type interface: str
     :return: None
     """
-    logging.debug(f"Waiting for {interface} to be created")
+    logger.debug(f"Waiting for {interface} to be created")
     ipr = IPRoute()
     start = time.monotonic()
     while not ipr.link_lookup(ifname=interface):  # type: ignore[attr-defined]
         if time.monotonic() - start > 30:
             raise TimeoutError(f"Timed out waiting for {interface} to be created")
-        logging.debug(f"{interface} not found, waiting...")
+        logger.debug(f"{interface} not found, waiting...")
         time.sleep(1)
 
 
@@ -153,12 +155,12 @@ def _ensure_single_nic_on_bridge(
     """
     external_ports = _get_external_ports_on_bridge(ovs_cli, external_bridge)
     if external_nic in external_ports:
-        logging.debug(f"{external_nic} already attached to {external_bridge}")
+        logger.debug(f"{external_nic} already attached to {external_bridge}")
     else:
         _add_interface_to_bridge(ovs_cli, external_bridge, external_nic)
     for p in external_ports:
         if p != external_nic:
-            logging.debug(
+            logger.debug(
                 f"Removing additional external port {p} from {external_bridge}"
             )
             _del_interface_from_bridge(ovs_cli, external_bridge, p)
@@ -173,7 +175,7 @@ def _ensure_link_up(interface: str):
     ipr = IPRoute()
     links = ipr.link_lookup(ifname=interface)  # type: ignore[attr-defined]
     if not links:
-        logging.warning(f"Interface {interface} not found when ensuring link up")
+        logger.warning(f"Interface {interface} not found when ensuring link up")
         return
     dev = links[0]
     ipr.link("set", index=dev, state="up")  # type: ignore[attr-defined]
@@ -191,7 +193,7 @@ def _add_ip_to_interface(interface: str, cidr: str) -> None:
     :type cidr: str
     :return: None
     """
-    logging.debug(f"Adding  ip {cidr} to {interface}")
+    logger.debug(f"Adding  ip {cidr} to {interface}")
     ipr = IPRoute()
     dev = ipr.link_lookup(ifname=interface)[0]  # type: ignore[attr-defined]
     ip_mask = cidr.split("/")
@@ -199,7 +201,7 @@ def _add_ip_to_interface(interface: str, cidr: str) -> None:
         ipr.addr("add", index=dev, address=ip_mask[0], mask=int(ip_mask[1]))  # type: ignore[attr-defined]
     except NetlinkError as e:
         if e.code != errno.EEXIST:
-            raise e
+            raise
 
     ipr.link("set", index=dev, state="up")  # type: ignore[attr-defined]
 
@@ -229,32 +231,32 @@ def _add_iptable_postrouting_rule(cidr: str, comment: str) -> None:
     try:
         cmd = [executable, "--check"]
         cmd.extend(rule_def)
-        logging.debug(cmd)
+        logger.debug(cmd)
         subprocess.run(cmd, capture_output=True, check=True)
     except subprocess.CalledProcessError as e:
         # --check has an RC of 1 if the rule does not exist
         if e.returncode == 1 and re.search(
             r"No.*match by that name", e.stderr.decode()
         ):
-            logging.debug(f"Postrouting iptable rule for {cidr} missing")
+            logger.debug(f"Postrouting iptable rule for {cidr} missing")
             found = False
         else:
-            logging.warning(f"Failed to lookup postrouting iptable rule for {cidr}")
+            logger.warning(f"Failed to lookup postrouting iptable rule for {cidr}")
     else:
         # If not exception was raised then the rule exists.
-        logging.debug(f"Found existing postrouting rule for {cidr}")
+        logger.debug(f"Found existing postrouting rule for {cidr}")
         found = True
     if not found:
-        logging.debug(f"Adding postrouting iptable rule for {cidr}")
+        logger.debug(f"Adding postrouting iptable rule for {cidr}")
         cmd = [executable, "--append"]
         cmd.extend(rule_def)
-        logging.debug(cmd)
+        logger.debug(cmd)
         subprocess.check_call(cmd)
 
 
 def _delete_iptable_postrouting_rule(comment: str) -> None:
     """Delete postrouting iptable rules based on comment."""
-    logging.debug("Resetting iptable rules added by openstack-hypervisor")
+    logger.debug("Resetting iptable rules added by openstack-hypervisor")
     if not comment:
         return
 
@@ -289,27 +291,63 @@ def _delete_iptable_postrouting_rule(comment: str) -> None:
                 "POSTROUTING",
                 number,
             ]
-            logging.debug(f"Deleting iptable rule: {delete_rule_cmd}")
+            logger.debug(f"Deleting iptable rule: {delete_rule_cmd}")
             subprocess.check_call(delete_rule_cmd)
     except subprocess.CalledProcessError as e:
-        logging.info(f"Error in deletion of IPtable rule: {e.stderr}")
+        logger.info(f"Error in deletion of IPtable rule: {e.stderr}")
+
+
+def _get_cms_options(ovs_cli: OVSCli) -> set[str]:
+    """Read the current external_ids:ovn-cms-options tokens from OVSDB.
+
+    ovn-cms-options is a comma-separated string (e.g. set by MicroOVN to
+    ``card-serial-number=...`` on DPU chassis) and must be read and merged
+    rather than blindly overwritten, or other options are silently dropped.
+    """
+    try:
+        raw_value = ovs_cli.vsctl(
+            "get",
+            "open",
+            ".",
+            "external_ids:ovn-cms-options",
+            skip_transaction=True,
+        )
+    except OVSCommandError:
+        return set()
+
+    normalized = _normalize_ovs_vsctl_value(raw_value)
+    if not normalized:
+        return set()
+    return {option.strip() for option in normalized.split(",") if option.strip()}
 
 
 def _enable_chassis_as_gateway(ovs_cli: OVSCli):
     """Enable OVS as an external chassis gateway."""
-    logging.info("Enabling OVS as external gateway")
+    logger.info("Enabling OVS as external gateway")
+    options = _get_cms_options(ovs_cli)
+    options.add("enable-chassis-as-gw")
     ovs_cli.set(
         "open",
         ".",
         "external_ids",
-        {"ovn-cms-options": "enable-chassis-as-gw"},
+        {"ovn-cms-options": ",".join(sorted(options))},
     )
 
 
 def _disable_chassis_as_gateway(ovs_cli: OVSCli):
     """Disable OVS as an external chassis gateway."""
-    logging.info("Disabling OVS as external gateway")
-    ovs_cli.remove("open", ".", "external_ids", "ovn-cms-options")
+    logger.info("Disabling OVS as external gateway")
+    options = _get_cms_options(ovs_cli)
+    options.discard("enable-chassis-as-gw")
+    if options:
+        ovs_cli.set(
+            "open",
+            ".",
+            "external_ids",
+            {"ovn-cms-options": ",".join(sorted(options))},
+        )
+    else:
+        ovs_cli.remove("open", ".", "external_ids", "ovn-cms-options")
 
 
 def configure_ovn_encap_ip(
@@ -366,57 +404,57 @@ def configure_ovn_external_networking(
         bridge_mapping,
     )
     if not mappings:
-        logging.info(
+        logger.info(
             "No valid bridge mappings found; skipping external network configuration."
         )
         return
     current_mappings = detect_current_mappings(ovs_cli)
 
     changes = resolve_ovs_changes(current_mappings, mappings)
-    logging.debug("OVS external networking changes: %s", changes)
+    logger.debug("OVS external networking changes: %s", changes)
 
     mappings = update_mappings_from_rename(mappings, changes["renamed_bridges"])
 
     if len(mappings) > 1 and external_bridge_address != IPVANYNETWORK_UNSET:
-        logging.warning(
+        logger.warning(
             "External bridge address configuration is supported only for localnet (i.e. no external nics)."
         )
         return
 
-    for bridge, change in changes["interface_changes"].items():
+    for bridge_name, change in changes["interface_changes"].items():
         for iface in change["removed"]:
             # Only remove interfaces that this snap added. Interfaces attached
             # by an operator (e.g. via MAAS/netplan) are not managed by us and
             # must be left untouched (LP: #2150222).
             if not _is_managed_port(ovs_cli, iface):
-                logging.info(
+                logger.info(
                     f"Skipping removal of unmanaged interface {iface} from "
-                    f"bridge {bridge}"
+                    f"bridge {bridge_name}"
                 )
                 continue
-            logging.info(f"Removing interface {iface} from bridge {bridge}")
-            _del_interface_from_bridge(ovs_cli, bridge, iface)
+            logger.info(f"Removing interface {iface} from bridge {bridge_name}")
+            _del_interface_from_bridge(ovs_cli, bridge_name, iface)
             # Adding interfaces is handled later.
 
-    for bridge in changes["removed_bridges"]:
+    for bridge_name in changes["removed_bridges"]:
         # Do not tear down a bridge that still carries operator-managed
         # interfaces (e.g. uplinks/VLANs attached via MAAS/netplan). Deleting
         # the bridge would also destroy those, breaking host connectivity
         # (LP: #2150222).
-        unmanaged = _get_unmanaged_interfaces_on_bridge(ovs_cli, bridge)
+        unmanaged = _get_unmanaged_interfaces_on_bridge(ovs_cli, bridge_name)
         if unmanaged:
-            logging.warning(
-                f"Skipping removal of ovs bridge {bridge}; it still has "
+            logger.warning(
+                f"Skipping removal of ovs bridge {bridge_name}; it still has "
                 f"operator-managed interfaces: {', '.join(unmanaged)}"
             )
             continue
-        logging.info(f"Removing ovs bridge {bridge}")
-        ovs_cli.del_bridge(bridge)
+        logger.info(f"Removing ovs bridge {bridge_name}")
+        ovs_cli.del_bridge(bridge_name)
 
-    for bridge in changes["added_bridges"]:
-        logging.info(f"Adding ovs bridge {bridge}")
+    for bridge_name in changes["added_bridges"]:
+        logger.info(f"Adding ovs bridge {bridge_name}")
         ovs_cli.add_bridge(
-            bridge,
+            bridge_name,
             "system",
             "protocols=OpenFlow13,OpenFlow15",
         )
@@ -438,7 +476,7 @@ def configure_ovn_external_networking(
     if len(mappings) == 1 and external_bridge_address != IPVANYNETWORK_UNSET:
         # We only support localnet mode for a single virtual physnet
         mapping = mappings[0]
-        logging.info(f"configuring external bridge {mapping.bridge}")
+        logger.info(f"configuring external bridge {mapping.bridge}")
         _add_ip_to_interface(mapping.bridge, external_bridge_address)
         external_network = ipaddress.ip_interface(external_bridge_address).network
         _add_iptable_postrouting_rule(str(external_network), comment)
@@ -450,13 +488,13 @@ def configure_ovn_external_networking(
     _delete_iptable_postrouting_rule(comment)
 
     for mapping in mappings:
-        logging.info(f"Resetting external bridge {mapping.bridge} configuration")
+        logger.info(f"Resetting external bridge {mapping.bridge} configuration")
         if mapping.interface:
-            logging.info(f"Adding {mapping.interface} to {mapping.bridge}")
+            logger.info(f"Adding {mapping.interface} to {mapping.bridge}")
             _ensure_single_nic_on_bridge(ovs_cli, mapping.bridge, mapping.interface)
             _ensure_link_up(mapping.interface)
         else:
-            logging.info(f"Removing nics from {mapping.bridge}")
+            logger.info(f"Removing nics from {mapping.bridge}")
             _del_external_nics_from_bridge(ovs_cli, mapping.bridge)
     machine_id = get_machine_id()
 

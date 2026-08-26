@@ -33,7 +33,7 @@ def update_default_config(snap: Snap) -> None:
     :type snap: Snap
     :return: None
     """
-    option_keys = set(k.split(".")[0] for k in DEFAULT_CONFIG.keys())
+    option_keys = {k.split(".")[0] for k in DEFAULT_CONFIG}
     current_options = snap.config.get_options(*option_keys)
     missing_options = {}
     for option, default in DEFAULT_CONFIG.items():

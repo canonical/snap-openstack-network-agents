@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2025 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import contextlib
 import hashlib
 import json
@@ -10,6 +12,8 @@ import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LAA_MAC_PREFIX = "0a:c5"
 INTEGRATION_BRIDGE = "br-int"
@@ -116,7 +120,7 @@ class OVSCli:
         self._timeout = timeout
 
     @contextlib.contextmanager
-    def transaction(self, retry: bool = True) -> Generator["OVSCli", None, None]:
+    def transaction(self, retry: bool = True) -> Generator[OVSCli]:
         """Context manager for batching multiple OVS commands into a single transaction.
 
         All ovs-vsctl commands executed within this context will be collected and
@@ -151,7 +155,7 @@ class OVSCli:
             self._transaction_commands = []
 
     @contextlib.contextmanager
-    def with_timeout(self, timeout: int) -> Generator["OVSCli", None, None]:
+    def with_timeout(self, timeout: int) -> Generator[OVSCli]:
         """Context manager to temporarily set a command timeout.
 
         Args:
@@ -223,7 +227,7 @@ class OVSCli:
         if timeout is not None:
             cmd.append(f"--timeout={timeout}")
         cmd.extend(args)
-        logging.debug("Executing command: %s", " ".join(cmd))
+        logger.debug("Executing command: %s", " ".join(cmd))
 
         try:
             completed = subprocess.run(  # nosec B603
@@ -347,7 +351,7 @@ class OVSCli:
             if not pair.strip():
                 continue
             if ":" not in pair:
-                logging.debug("Skipping malformed bridge mapping entry: %s", pair)
+                logger.debug("Skipping malformed bridge mapping entry: %s", pair)
                 continue
             physnet, bridge = pair.split(":", 1)
             physnet = physnet.strip()
@@ -372,7 +376,7 @@ class OVSCli:
             OVSCommandError: If the command fails.
         """
         if not settings:
-            logging.warning("No ovs values to set, skipping...")
+            logger.warning("No ovs values to set, skipping...")
             return
 
         args = ["set", table, record]
@@ -615,13 +619,13 @@ class OVSCli:
         args = ["remove", table, record, column, key]
         try:
             self.vsctl(*args)
-            logging.debug("Removed %s:%s from %s.%s", column, key, table, record)
+            logger.debug("Removed %s:%s from %s.%s", column, key, table, record)
             return True
         except OVSCommandError as exc:
             # Check if error is due to key not existing
             error_msg = str(exc).lower()
             if "not found" in error_msg or "no such key" in error_msg:
-                logging.debug(
+                logger.debug(
                     "Key %s not found in %s.%s, treating as no-op", key, table, record
                 )
                 return False
@@ -661,7 +665,7 @@ class OVSCli:
                     f"SSL {file_type} file is not readable: {file_path}"
                 )
 
-        logging.info("Configuring OVS SSL with certificate: %s", certificate)
+        logger.info("Configuring OVS SSL with certificate: %s", certificate)
         self.vsctl("set-ssl", private_key, certificate, ca_cert)
 
     def appctl(self, *args: str) -> str:
@@ -689,7 +693,7 @@ class OVSCli:
             cmd.extend(["--target", self.switchd_ctl_socket])
 
         cmd.extend(args)
-        logging.debug("Executing command: %s", " ".join(cmd))
+        logger.debug("Executing command: %s", " ".join(cmd))
 
         try:
             completed = subprocess.run(  # nosec B603
@@ -731,7 +735,7 @@ class OVSCli:
             return False
 
 
-def resolve_bridge_mappings(  # noqa: C901
+def resolve_bridge_mappings(
     external_bridge: str,
     physnet_name: str,
     external_nic: str,
@@ -784,12 +788,12 @@ def resolve_bridge_mappings(  # noqa: C901
             BridgeMapping(external_bridge, physnet_name, external_nic or None)
         )
     else:
-        logging.info("No OVN external networking configuration found.")
+        logger.info("No OVN external networking configuration found.")
 
     return mappings
 
 
-def resolve_ovs_changes(  # noqa: C901
+def resolve_ovs_changes(
     previous_mapping: list[BridgeMapping], new_mapping: list[BridgeMapping]
 ) -> BridgeResolutionStatus:
     """This function outputs a structured status of changes between 2 mappings.
@@ -906,7 +910,7 @@ def update_mappings_from_rename(
     if not renames:
         return mappings
 
-    rename_dict = dict((new_name, old_name) for old_name, new_name in renames)
+    rename_dict = {new_name: old_name for old_name, new_name in renames}
     updated_mappings = []
     for mapping in mappings:
         if mapping.bridge not in rename_dict:
@@ -923,7 +927,7 @@ def update_mappings_from_rename(
     return updated_mappings
 
 
-def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping]:  # noqa: C901
+def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping]:
     """Detect current bridge mappings from system configuration.
 
     Args:
@@ -938,11 +942,11 @@ def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping
     try:
         bridges = ovs_cli.list_bridges()
     except OVSCommandError as exc:
-        logging.warning("Unable to query OVS bridges: %s", exc)
+        logger.warning("Unable to query OVS bridges: %s", exc)
         return []
 
     if not bridges:
-        logging.info("No OVS bridges found while detecting current mappings.")
+        logger.info("No OVS bridges found while detecting current mappings.")
         return []
 
     bridge_physnet_map = ovs_cli.get_bridge_physnet_map()
@@ -961,7 +965,7 @@ def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping
         physnet = bridge_physnet_map.get(bridge)
 
         if not physnet:
-            logging.warning(
+            logger.warning(
                 "Physnet mapping missing for bridge %s; skipping.",
                 bridge,
             )
@@ -970,7 +974,7 @@ def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping
         try:
             interfaces = ovs_cli.list_bridge_interfaces(bridge)
         except OVSCommandError as exc:
-            logging.warning("Failed to list interfaces for bridge %s: %s", bridge, exc)
+            logger.warning("Failed to list interfaces for bridge %s: %s", bridge, exc)
             add_mapping((bridge, physnet, None))
             continue
 

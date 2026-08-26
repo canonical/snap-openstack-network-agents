@@ -4,7 +4,7 @@
 import glob
 import logging
 import pathlib
-from typing import Iterable
+from collections.abc import Iterable
 
 import pydantic
 from pyroute2.ndb.objects.interface import Interface
@@ -30,7 +30,7 @@ class NicList(pydantic.RootModel[list[InterfaceOutput]]):
     """Root schema for a list of interfaces."""
 
 
-def to_output_schema(nics: list[Interface]) -> NicList:  # noqa: C901
+def to_output_schema(nics: list[Interface]) -> NicList:
     """Convert the interfaces to the output schema."""
     nics_ = []
 
@@ -53,7 +53,7 @@ def get_interfaces(ndb) -> list[Interface]:
     """Get all interfaces from the system."""
     interfaces = []
     iface_view = ndb.interfaces
-    for key in iface_view.keys():
+    for key in iface_view:
         try:
             interfaces.append(iface_view[key])
         except KeyError:
