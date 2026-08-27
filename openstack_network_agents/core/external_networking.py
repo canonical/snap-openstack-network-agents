@@ -313,6 +313,7 @@ def _get_cms_options(ovs_cli: OVSCli) -> set[str]:
             skip_transaction=True,
         )
     except OVSCommandError:
+        logger.debug("No existing ovn-cms-options set; starting from empty set.")
         return set()
 
     normalized = _normalize_ovs_vsctl_value(raw_value)
