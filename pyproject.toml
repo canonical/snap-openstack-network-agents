@@ -33,7 +33,7 @@ dependencies = [
     "click>=8.3.1",
     "prettytable>=3.17.0",
     "pydantic>=2,<3",
-    "pyroute2==0.7.11",
+    "pyroute2==0.9.6",
     "snap-helpers @ git+https://github.com/albertodonato/snap-helpers@46803aa9d52cc0bb24f76df878dd1010fc08e6a0",
 ]
 
