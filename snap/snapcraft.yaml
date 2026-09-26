@@ -21,7 +21,7 @@ issues:
 source-code:
   - https://github.com/canonical/snap-openstack-network-agents
 base: core26
-version: "2026.1"
+version: "2026.2"
 adopt-info: snap-version
 license: Apache-2.0
 grade: stable
@@ -86,9 +86,9 @@ parts:
     override-build: |
       craftctl default
       snap-helpers write-hooks
-      # purge external symlinks created by uv venv
-      rm -f "$CRAFT_PART_INSTALL/bin/python"
+      # Fix external symlinks from uv venv
       rm -f "$CRAFT_PART_INSTALL/bin/python3.14"
+      ln -sf ../usr/bin/python3.14 "$CRAFT_PART_INSTALL/bin/python"
 
 hooks:
   install:
