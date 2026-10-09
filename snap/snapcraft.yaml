@@ -21,7 +21,7 @@ issues:
 source-code:
   - https://github.com/canonical/snap-openstack-network-agents
 base: core26
-version: "2026.1"
+version: "2026.2"
 adopt-info: snap-version
 license: Apache-2.0
 grade: stable
