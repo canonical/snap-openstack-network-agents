@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import socket
 import stat
 from configparser import ConfigParser
-from subprocess import CalledProcessError
+from pathlib import Path
+from subprocess import CalledProcessError, TimeoutExpired
 from unittest.mock import call, patch
 
 import pytest
@@ -418,3 +420,118 @@ def test_dual_stack_reconciles_each_family_independently(tmp_path):
             entry.args for entry in pebble.call_args_list if entry.args[0] == "stop"
         ] == [("stop", "agent-client6-v6")]
         assert not ipv6_config.exists()
+
+
+@pytest.fixture
+def routing_with_socket(tmp_path, monkeypatch):
+    routing = DynamicRouting(tmp_path, tmp_path / "snap")
+    routing.pebble_dir.mkdir()
+    monkeypatch.chdir(routing.pebble_dir)
+    # Linux limits UNIX socket addresses to 107 bytes.
+    routing.socket = Path(".pebble.socket")
+    return routing
+
+
+def test_recover_active_placement_with_abandoned_pebble_socket(routing_with_socket):
+    routing = routing_with_socket
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(routing.socket))
+
+    with (
+        patch.object(
+            routing, "_list_services", side_effect=CalledProcessError(1, "pebble")
+        ),
+        patch("subprocess.run") as snapctl,
+    ):
+        _apply(routing, _config(_instance("alpha")))
+
+    snapctl.assert_called_once_with(
+        ["snapctl", "start", "--enable", "openstack-network-agents.pebble"],
+        check=True,
+        timeout=35,
+    )
+    assert routing.socket.is_socket()
+
+
+def test_keeps_socket_when_live_pebble_cannot_list_services(routing_with_socket):
+    routing = routing_with_socket
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(routing.socket))
+        listener.listen()
+        with (
+            patch.object(
+                routing, "_list_services", side_effect=CalledProcessError(1, "pebble")
+            ),
+            patch("subprocess.run") as snapctl,
+            pytest.raises(RuntimeError, match="supervisor is unreachable"),
+        ):
+            _apply(routing, _config(_instance("alpha")))
+    snapctl.assert_not_called()
+    assert routing.socket.is_socket()
+
+
+def test_pebble_timeout_is_not_a_stale_socket(routing_with_socket):
+    routing = routing_with_socket
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(routing.socket))
+    with (
+        patch.object(
+            routing, "_list_services", side_effect=TimeoutExpired("pebble", 35)
+        ),
+        patch("subprocess.run") as snapctl,
+        pytest.raises(RuntimeError, match="supervisor is unreachable"),
+    ):
+        _apply(routing, _config(_instance("alpha")))
+    snapctl.assert_not_called()
+    assert routing.socket.is_socket()
+
+
+@pytest.mark.parametrize("bad_layer", ['{"services":', '{"services": []}'])
+@pytest.mark.parametrize("startup_first", [False, True])
+def test_quarantines_only_corrupt_ndr_layer_and_rebuilds(
+    tmp_path, bad_layer, startup_first
+):
+    routing = DynamicRouting(tmp_path, tmp_path / "snap")
+    routing.layer.parent.mkdir(parents=True)
+    routing.layer.write_text(bad_layer)
+    other = routing.layer.parent / "010-other.yaml"
+    other.write_text("services: {}")
+
+    if startup_first:
+        routing.guard_supervisor_start()
+        assert not routing.layer.exists()
+
+    with patch("subprocess.run"):
+        _apply(routing, _config(_instance("alpha")))
+
+    assert other.read_text() == "services: {}"
+    assert routing.layer.with_suffix(".invalid").read_text() == bad_layer
+    services = json.loads(routing.layer.read_text())["services"]
+    assert services["agent-alpha-v4"]["startup"] == "disabled"
+
+
+@pytest.mark.parametrize("other_service", [False, True])
+def test_disable_stops_sole_supervisor_but_preserves_unrelated_live_services(
+    tmp_path, other_service
+):
+    routing = DynamicRouting(tmp_path, tmp_path / "snap")
+    with patch("subprocess.run"):
+        _apply(routing, _config(_instance("alpha")))
+    routing.socket.touch()
+    live = {"agent-alpha-v4": {"current": "active"}}
+    if other_service:
+        live["other"] = {"current": "active"}
+    with (
+        patch.object(routing, "_list_services", return_value=live),
+        patch.object(routing, "_run_pebble") as pebble,
+        patch.object(routing, "_stop_supervisor") as stop,
+    ):
+        routing.apply([], disable_supervisor=True)
+
+    if other_service:
+        stop.assert_not_called()
+        assert call("stop", "agent-alpha-v4") in pebble.call_args_list
+    else:
+        stop.assert_called_once_with()
+        pebble.assert_not_called()
+    assert not routing.layer.exists()

@@ -257,6 +257,12 @@ class NDRPeering:
                 result[record["name"]] = domain
         return result
 
+    def managed_ports_match(self, attachments: list[Attachment]) -> bool:
+        """Check desired and observed OVS port names independently of IP readiness."""
+        return self._owned_ports().keys() == {
+            item.interface for item in attachments if item.bridge
+        }
+
     def _remove_ports(self, keep: set[str]) -> None:
         for interface, domain in self._owned_ports().items():
             if interface in keep:
