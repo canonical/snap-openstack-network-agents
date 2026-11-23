@@ -59,6 +59,7 @@ openstack-network-agents = "openstack_network_agents.cli.main:main"
 [project.entry-points.'snaphelpers.hooks']
 configure = "openstack_network_agents.hooks.configure:hook"
 install = "openstack_network_agents.hooks.install:hook"
+remove = "openstack_network_agents.hooks.remove:hook"
 
 [tool.setuptools.packages.find]
 include = ["openstack_network_agents*"]

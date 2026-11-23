@@ -6,6 +6,7 @@ import os
 import click
 from snaphelpers import Snap
 
+from openstack_network_agents.cli.dynamic_routing import dynamic_routing
 from openstack_network_agents.cli.log import setup_root_logging
 from openstack_network_agents.cli.nics import list_nics
 from openstack_network_agents.cli.setup_bridge import setup_bridge
@@ -37,6 +38,7 @@ def main():
     cli.add_command(setup_bridge)
     cli.add_command(show_bridge_setup)
     cli.add_command(list_nics)
+    cli.add_command(dynamic_routing)
 
     cli(obj=snap)
 

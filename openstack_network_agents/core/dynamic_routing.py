@@ -4,12 +4,17 @@
 """Reconcile local Neutron Dynamic Routing agents under Pebble."""
 
 import ast
+import fcntl
 import json
+import logging
 import os
 import shlex
+import socket
 import ssl
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
@@ -17,6 +22,8 @@ from typing import NotRequired, TypedDict, cast
 from sunbeam_ndr_contract import Agent, Instance, parse_instances
 
 from openstack_network_agents.core.templates import get_template
+
+logger = logging.getLogger(__name__)
 
 _PEBBLE_APP = "openstack-network-agents.pebble"
 
@@ -160,20 +167,54 @@ class DynamicRouting:
         if result.returncode:
             raise RuntimeError(f"NDR Pebble {args[0]} failed.")
 
+    @contextmanager
+    def _lock_layer(self) -> Iterator[None]:
+        # Pebble startup and host reconciliation use different processes.
+        # Hold this lock only for layer I/O, never around snapctl.
+        self.pebble_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (self.pebble_dir / ".ndr-layer.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    @staticmethod
+    def _read_layer(path: Path) -> PebbleLayer:
+        """Load a generated layer or move an invalid copy out of Pebble's plan."""
+        try:
+            plan = json.loads(path.read_text())
+        except FileNotFoundError:
+            return {}
+        except ValueError:
+            plan = None
+        if isinstance(plan, dict):
+            services = plan.get("services", {})
+            if isinstance(services, dict) and all(
+                isinstance(service, dict)
+                and isinstance(service.get("command"), str)
+                and service.get("startup") in (None, "enabled", "disabled")
+                for service in services.values()
+            ):
+                return cast(PebbleLayer, plan)
+
+        quarantined = path.with_suffix(".invalid")
+        path.replace(quarantined)
+        logger.warning("Moved invalid NDR Pebble layer to %s.", quarantined)
+        return {}
+
     def guard_supervisor_start(self) -> None:
-        """Pause legacy NDR services until host readiness has been checked."""
-        if not (previous := _read(self.layer)):
+        """Pause NDR services until host readiness has been checked."""
+        if not self.layer.exists():
             return
-        plan = json.loads(previous)
-        services = plan.get("services", {})
-        if "log-targets" in plan or any(
-            service.get("startup") != "disabled" for service in services.values()
-        ):
-            for service in services.values():
-                service["startup"] = "disabled"
-            _write_private(
-                self.layer, json.dumps({"services": services}, sort_keys=True)
-            )
+        with self._lock_layer():
+            plan = self._read_layer(self.layer)
+            services = plan.get("services", {})
+            if "log-targets" in plan or any(
+                service.get("startup") != "disabled" for service in services.values()
+            ):
+                for service in services.values():
+                    service["startup"] = "disabled"
+                _write_private(
+                    self.layer, json.dumps({"services": services}, sort_keys=True)
+                )
 
     def _service_path(self, service: str) -> Path:
         return self.directory / "agents" / service
@@ -261,11 +302,15 @@ class DynamicRouting:
         )
 
     def _inventory(self) -> _PebbleInventory:
-        saved = _read(self.layer)
-        legacy = _read(self.legacy_layer)
+        saved: PebbleLayer = {}
+        legacy: PebbleLayer = {}
+        if self.layer.exists() or self.legacy_layer.exists():
+            with self._lock_layer():
+                saved = self._read_layer(self.layer)
+                legacy = self._read_layer(self.legacy_layer)
         return _PebbleInventory(
-            layer=cast(PebbleLayer, json.loads(saved)) if saved else PebbleLayer(),
-            legacy_services=set(json.loads(legacy)["services"]) if legacy else set(),
+            layer=saved,
+            legacy_services=set(legacy.get("services", {})),
             configs={
                 path.parent.name for path in self.directory.glob("agents/*/agent.conf")
             },
@@ -277,7 +322,20 @@ class DynamicRouting:
             return None
         try:
             return self._list_services()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        except subprocess.CalledProcessError as error:
+            # A failed CLI call can also mean an unhealthy live supervisor.
+            # Let Pebble reclaim the path only after proving no listener exists.
+            if self.socket.is_socket():
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(1)
+                    try:
+                        connection.connect(str(self.socket))
+                    except ConnectionRefusedError, FileNotFoundError:
+                        return None
+                    except OSError:
+                        pass
+            raise RuntimeError("The NDR Pebble supervisor is unreachable.") from error
+        except subprocess.TimeoutExpired as error:
             raise RuntimeError("The NDR Pebble supervisor is unreachable.") from error
 
     def _stop_supervisor(self) -> None:
@@ -327,6 +385,7 @@ class DynamicRouting:
         *,
         transport: str = "",
         ca_cert: str = "",
+        disable_supervisor: bool = False,
     ) -> None:
         """Reconcile instances while keeping unaffected BGP sessions running."""
         if not agents:
@@ -341,9 +400,15 @@ class DynamicRouting:
             if agents or inventory.shared:
                 raise
             live = None
-        if live is None and not (agents or inventory.shared):
-            # Stop the daemon through snapd before discarding its private files.
+        known = configured | inventory.configs
+        if (
+            not agents
+            and not inventory.shared
+            and (live is None or (disable_supervisor and not live.keys() - known))
+        ):
+            # Preserve other workloads, including layers added only in memory.
             self._stop_supervisor()
+            live = None
 
         previous_plan = inventory.layer
         current = previous_plan.get("services", {}).copy()
@@ -404,7 +469,8 @@ class DynamicRouting:
         if not ca_cert:
             self.ca_file.unlink(missing_ok=True)
         if desired:
-            _write_private(self.layer, json.dumps(plan, sort_keys=True))
+            with self._lock_layer():
+                _write_private(self.layer, json.dumps(plan, sort_keys=True))
             if live is None:
                 subprocess.run(
                     ["snapctl", "start", "--enable", _PEBBLE_APP],
@@ -413,5 +479,8 @@ class DynamicRouting:
                 )
         else:
             # Retain the cleanup index until the services and files are retired.
-            self.layer.unlink(missing_ok=True)
-        self.legacy_layer.unlink(missing_ok=True)
+            with self._lock_layer():
+                self.layer.unlink(missing_ok=True)
+        if self.legacy_layer.exists():
+            with self._lock_layer():
+                self.legacy_layer.unlink(missing_ok=True)

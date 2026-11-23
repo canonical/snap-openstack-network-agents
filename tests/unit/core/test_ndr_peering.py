@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: 2026 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from ipaddress import ip_interface
 from unittest.mock import Mock
 
 import pytest
+from click.testing import CliRunner
 from sunbeam_ndr_contract import parse_instances
 
-from openstack_network_agents.core import ndr_peering
+from openstack_network_agents.cli.dynamic_routing import dynamic_routing
+from openstack_network_agents.core import ndr_host, ndr_peering
 
 
 def _instance(domain, mode, family, **peering):
@@ -65,6 +68,83 @@ def test_resolve_managed_and_dedicated_attachments(host):
     assert blue.interface == "uplink122"
     assert normalized[0] == instances[0].declaration
     assert normalized[1]["peering"]["dedicated-uplink"]["address"] == "2001:db8::3"
+
+
+def test_validate_cli_returns_v1_placement_without_applying_it(host, monkeypatch):
+    monkeypatch.setattr(ndr_host, "_host", Mock(return_value=host))
+    monkeypatch.delenv("SNAP", raising=False)
+    run_nft = Mock()
+    monkeypatch.setattr(ndr_peering.subprocess, "run", run_nft)
+    red = {
+        "domain": "red",
+        "family": "ipv4",
+        "host": "net-01.red",
+        "service-name": "agent-red",
+        "router-id": "198.18.0.1",
+        "peering": {
+            "provider-trunk": {
+                "physnet": "physnet1",
+                "vlan": 120,
+                "address": "192.0.2.3/28",
+            },
+        },
+    }
+    blue = {
+        "domain": "blue",
+        "family": "ipv6",
+        "host": "net-01.blue",
+        "service-name": "agent-blue",
+        "router-id": "198.18.0.2",
+        "peering": {"dedicated-uplink": {"interface": "uplink122"}},
+    }
+
+    result = CliRunner().invoke(
+        dynamic_routing, ["validate"], input=json.dumps([red, blue]), obj=Mock()
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "contract-version": 1,
+        "instances": [
+            red,
+            {
+                **blue,
+                "peering": {
+                    "dedicated-uplink": {
+                        "interface": "uplink122",
+                        "address": "2001:db8::3",
+                    },
+                },
+            },
+        ],
+        "managed-addresses": {"ndr-b1f51a511f1": "192.0.2.3/28"},
+    }
+    run_nft.assert_called_once()
+    assert run_nft.call_args.args == (["nft", "--check", "-f", "-"],)
+    assert '"ndr-b1f51a511f1", "uplink122"' in run_nft.call_args.kwargs["input"]
+    host.ovs.vsctl.assert_not_called()
+    host.ovs.del_port.assert_not_called()
+
+
+def test_validate_cli_rejects_legacy_placement_before_reading_host(monkeypatch):
+    host = Mock()
+    monkeypatch.setattr(ndr_host, "_host", host)
+    declaration = {
+        "domain": "red",
+        "family": "ipv4",
+        "host": "net-01.red",
+        "service-name": "agent-red",
+        "router-id": "198.18.0.1",
+    }
+
+    result = CliRunner().invoke(
+        dynamic_routing, ["validate"], input=json.dumps([declaration]), obj=Mock()
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "NDR domain red needs exactly one peering attachment." in result.stderr
+    host.assert_not_called()
 
 
 def test_reject_shared_provider_segment(host):
