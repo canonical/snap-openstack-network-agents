@@ -105,6 +105,8 @@ parts:
       - cargo
       - rustc
     stage-packages:
+      - iproute2
+      - nftables
       - openvswitch-switch
       - python3.14-minimal
       - neutron-bgp-dragent
