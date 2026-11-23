@@ -1,0 +1,25 @@
+{# SPDX-FileCopyrightText: 2026 - Canonical Ltd
+   SPDX-License-Identifier: Apache-2.0 -#}
+add table inet {{ table }}
+delete table inet {{ table }}
+{% if attachments %}
+table inet {{ table }} {
+  set peering_ports { type ifname; elements = { {{ attachments | map(attribute="interface") | map("tojson") | join(", ") }} }; }
+  chain input {
+    type filter hook input priority filter; policy accept;
+    ct state established,related accept
+    iifname @peering_ports ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
+    iifname @peering_ports icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+    iifname @peering_ports icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+    iifname @peering_ports counter drop
+{% for selector, addresses in (("ip", ipv4_addresses), ("ip6", ipv6_addresses)) if addresses %}
+    {{ selector }} daddr { {{ addresses | join(", ") }} } counter drop
+{% endfor %}
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname @peering_ports counter drop
+    oifname @peering_ports counter drop
+  }
+}
+{% endif %}
