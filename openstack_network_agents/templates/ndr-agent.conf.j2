@@ -1,0 +1,20 @@
+{# SPDX-FileCopyrightText: 2026 - Canonical Ltd
+   SPDX-License-Identifier: Apache-2.0 -#}
+[DEFAULT]
+host = {{ host }}
+state_path = {{ state_path }}
+{# oslo.config interprets dollar signs in INI values. #}
+transport_url = {{ transport_url | replace("$", "$$") }}
+log_file = {{ log_file }}
+use_stderr = true
+log_rotation_type = size
+max_logfile_size_mb = 10
+max_logfile_count = 5
+[BGP]
+bgp_speaker_driver = neutron_dynamic_routing.services.bgp.agent.driver.os_ken.driver.OsKenBgpDriver
+bgp_router_id = {{ router_id }}
+[oslo_messaging_rabbit]
+rabbit_quorum_queue = true
+ssl = {{ tls | lower }}
+ssl_ca_file = {{ ca_file }}
+ssl_enforce_hostname_verification = true
