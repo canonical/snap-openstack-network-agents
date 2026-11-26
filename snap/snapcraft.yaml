@@ -10,6 +10,7 @@ description: |
       connectivity.
     - NIC discovery: identifies candidate uplink interfaces, filtering out
       virtual devices and bond members.
+    - Optional Neutron Dynamic Routing agents supervised by Pebble.
     - A CLI for manual inspection and one-shot configuration
       (setup-bridge, show-bridge-setup, list-nics).
 
@@ -36,6 +37,9 @@ environment:
   PYTHONPATH: $SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
 
 plugs:
+  shared-memory:
+    interface: shared-memory
+    private: true
   network-control:
     interface: network-control
   network:
@@ -44,12 +48,43 @@ plugs:
     interface: content
     target: $SNAP_DATA/microovn/chassis
 
+slots:
+  openstack-network-agents-logs:
+    interface: content
+    content: logs
+    source:
+      read:
+        - $SNAP_COMMON/ndr-logs
+
 apps:
   openstack-network-agents:
     environment:
       # Ensure site packages are loaded first
       PYTHONPATH: $SNAP/usr/lib/python3.14:$SNAP/usr/lib/python3.14/site-packages:$SNAP/lib/python3.14:$SNAP/lib/python3.14/site-packages:$SNAP/usr/lib/python3/dist-packages:$PYTHONPATH
     command: bin/openstack-network-agents
+    plugs:
+      - network
+      - network-control
+      - ovn-chassis
+      - firewall-control
+
+  pebble:
+    command: bin/openstack-network-agents start-pebble
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
+    environment:
+      PEBBLE: $SNAP_COMMON/pebble
+    plugs:
+      - network
+      - network-bind
+      - shared-memory
+
+  ndr-host:
+    command: bin/openstack-network-agents dynamic-routing watch
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
     plugs:
       - network
       - network-control
@@ -81,8 +116,11 @@ parts:
       - cargo
       - rustc
     stage-packages:
+      - iproute2
+      - nftables
       - openvswitch-switch
       - python3.14-minimal
+      - neutron-bgp-dragent
     override-build: |
       craftctl default
       snap-helpers write-hooks
@@ -92,8 +130,17 @@ parts:
       ln -s python3 $CRAFT_PART_INSTALL/bin/python
       ln -s ../usr/bin/python3.14 $CRAFT_PART_INSTALL/bin/python3.14
 
+  pebble:
+    plugin: nil
+    stage-snaps:
+      - pebble@latest/stable
+    stage:
+      - bin/pebble
+
 hooks:
   install:
     plugs: [network, network-control, ovn-chassis, firewall-control]
   configure:
+    plugs: [network, network-control, ovn-chassis, firewall-control]
+  remove:
     plugs: [network, network-control, ovn-chassis, firewall-control]

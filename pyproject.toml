@@ -31,10 +31,12 @@ classifiers = [
 
 dependencies = [
     "click>=8.3.1",
+    "jinja2>=3.1",
     "prettytable>=3.17.0",
     "pydantic>=2,<3",
     "pyroute2==0.7.11",
     "snap-helpers @ git+https://github.com/albertodonato/snap-helpers@76f8166b640163c0f20887829e31b2cafbfdec11",
+    "sunbeam-ndr-contract==2027.1.0.dev0",
 ]
 
 [project.optional-dependencies]
@@ -57,9 +59,14 @@ openstack-network-agents = "openstack_network_agents.cli.main:main"
 [project.entry-points.'snaphelpers.hooks']
 configure = "openstack_network_agents.hooks.configure:hook"
 install = "openstack_network_agents.hooks.install:hook"
+remove = "openstack_network_agents.hooks.remove:hook"
 
-[tool.setuptools]
-packages = ["openstack_network_agents"]
+[tool.setuptools.packages.find]
+include = ["openstack_network_agents*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+openstack_network_agents = ["templates/*.j2"]
 
 # Testing tools configuration
 [tool.coverage.run]
