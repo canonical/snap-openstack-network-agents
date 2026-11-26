@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.14.*"
 
 [[package]]
@@ -298,7 +298,7 @@ requires-dist = [
     { name = "prettytable", specifier = ">=3.17.0" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pylint", marker = "extra == 'tics'" },
-    { name = "pyroute2", specifier = "==0.7.11" },
+    { name = "pyroute2", specifier = "==0.9.7" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-mock", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
@@ -456,13 +456,14 @@ wheels = [
 
 [[package]]
 name = "pyroute2"
-version = "0.7.11"
+version = "0.9.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "win-inet-pton", marker = "sys_platform == 'win32'" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/2a/d295013eb67b5bb3a0ebff7c6ae3f635a8f55929b3f5367889ddadd7f4dd/pyroute2-0.9.7.tar.gz", hash = "sha256:a678b098478c46ec51d6bf9a03c3cd2ac0172dffa590e9e8c1eeab633d0c17c6", size = 493409, upload-time = "2026-10-23T15:27:48.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/f3/32f8008ca4e6faa6561e2f580e95453d37793dff31c766fe3f7ddf2e29a9/pyroute2-0.7.11-py3-none-any.whl", hash = "sha256:95852e702149b3d6abc8484d3291c38c45660168e8db76e5566a60ef0e133d5b", size = 459942, upload-time = "2024-01-12T18:29:39.202Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/4e/d9ce0ff4b50da558a075a647ccb39074b7943cff26e8450a35a32c6e2948/pyroute2-0.9.7-py3-none-any.whl", hash = "sha256:01a2a3afe565a6acb0a0d5d8ac86c9682b6564407e3d9589070191ae94b737e8", size = 491864, upload-time = "2026-10-23T15:27:43.335Z" },
 ]
 
 [[package]]
