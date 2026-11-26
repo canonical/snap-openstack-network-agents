@@ -136,6 +136,14 @@ parts:
       ln -s python3 $CRAFT_PART_INSTALL/bin/python
       ln -s ../usr/bin/python3.14 $CRAFT_PART_INSTALL/bin/python3.14
 
+      # Drop symlinks to the host's IEEE registry files.
+      for registry in iab.txt oui.txt; do
+        registry_path="$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages/netaddr/eui/$registry"
+        if [ -L "$registry_path" ]; then
+          unlink "$registry_path" || exit 1
+        fi
+      done
+
   pebble:
     plugin: nil
     stage-snaps:
