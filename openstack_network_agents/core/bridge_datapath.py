@@ -442,7 +442,11 @@ class OVSCli:
         return json.loads(output)
 
     def add_bridge(
-        self, bridge_name: str, datapath_type: str = "system", *cmd_args: str
+        self,
+        bridge_name: str,
+        datapath_type: str = "system",
+        *cmd_args: str,
+        may_exist: bool = True,
     ) -> None:
         """Add a bridge to OVS.
 
@@ -450,12 +454,12 @@ class OVSCli:
             bridge_name: Name of the bridge to add.
             datapath_type: Datapath type ("system" or "netdev").
             *cmd_args: Additional arguments to pass (e.g., "protocols=OpenFlow13").
+            may_exist: Whether to apply the settings to an existing bridge.
 
         Raises:
             OVSCommandError: If the command fails.
         """
         args = [
-            "--may-exist",
             "add-br",
             bridge_name,
             "--",
@@ -464,6 +468,8 @@ class OVSCli:
             bridge_name,
             f"datapath_type={datapath_type}",
         ]
+        if may_exist:
+            args.insert(0, "--may-exist")
         args.extend(cmd_args)
         self.vsctl(*args)
 
@@ -927,11 +933,14 @@ def update_mappings_from_rename(
     return updated_mappings
 
 
-def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping]:
+def detect_current_mappings(
+    ovs_cli: OVSCli | None = None, *, bridges: list[str] | None = None
+) -> list[BridgeMapping]:
     """Detect current bridge mappings from system configuration.
 
     Args:
         ovs_cli: Optional OVSCli instance to use. If not provided, a new one is created.
+        bridges: Existing bridge names, if already read by the caller.
 
     Returns:
         List of BridgeMapping objects representing current system state.
@@ -939,11 +948,12 @@ def detect_current_mappings(ovs_cli: OVSCli | None = None) -> list[BridgeMapping
     if ovs_cli is None:
         ovs_cli = OVSCli()
 
-    try:
-        bridges = ovs_cli.list_bridges()
-    except OVSCommandError as exc:
-        logger.warning("Unable to query OVS bridges: %s", exc)
-        return []
+    if bridges is None:
+        try:
+            bridges = ovs_cli.list_bridges()
+        except OVSCommandError as exc:
+            logger.warning("Unable to query OVS bridges: %s", exc)
+            return []
 
     if not bridges:
         logger.info("No OVS bridges found while detecting current mappings.")

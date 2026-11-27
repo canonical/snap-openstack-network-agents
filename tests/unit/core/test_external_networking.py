@@ -382,11 +382,42 @@ class TestConfigureOvnExternalNetworking:
             "br-new1",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            may_exist=False,
         )
         mock_ovs_cli.add_bridge.assert_any_call(
             "br-new2",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            may_exist=False,
+        )
+
+    def test_adopt_existing_unmapped_bridge(
+        self,
+        mock_external_networking_deps,
+        mock_ovs_cli,
+    ):
+        """Mapping an existing bridge must preserve its settings and uplink."""
+        mocks = mock_external_networking_deps
+        mocks["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_ovs_cli.list_bridge_interfaces.return_value = ["bond1"]
+
+        configure_ovn_external_networking(
+            bridge="br-ex",
+            physnet="physnet1",
+            interface="",
+            bridge_mapping="br-data:physnet1",
+            enable_chassis_as_gw=True,
+            external_bridge_address=IPVANYNETWORK_UNSET,
+            ovs_cli=mock_ovs_cli,
+        )
+
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_ovs_cli.del_bridge.assert_not_called()
+        mocks["ensure_single_nic_on_bridge"].assert_not_called()
+        mocks["del_interface_from_bridge"].assert_not_called()
+        mock_ovs_cli.set.assert_any_call(
+            "open", ".", "external_ids", {"ovn-bridge-mappings": "physnet1:br-data"}
         )
 
     def test_interface_removal_from_bridge(
@@ -722,6 +753,7 @@ class TestConfigureOvnExternalNetworking:
             "br-new",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            may_exist=False,
         )
 
     def test_multiple_interface_changes_on_multiple_bridges(

@@ -409,7 +409,8 @@ def configure_ovn_external_networking(
             "No valid bridge mappings found; skipping external network configuration."
         )
         return
-    current_mappings = detect_current_mappings(ovs_cli)
+    existing_bridges = ovs_cli.list_bridges()
+    current_mappings = detect_current_mappings(ovs_cli, bridges=existing_bridges)
 
     changes = resolve_ovs_changes(current_mappings, mappings)
     logger.debug("OVS external networking changes: %s", changes)
@@ -453,11 +454,15 @@ def configure_ovn_external_networking(
         ovs_cli.del_bridge(bridge_name)
 
     for bridge_name in changes["added_bridges"]:
+        if bridge_name in existing_bridges:
+            logger.info("Using existing OVS bridge %s", bridge_name)
+            continue
         logger.info(f"Adding ovs bridge {bridge_name}")
         ovs_cli.add_bridge(
             bridge_name,
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            may_exist=False,
         )
     ovs_cli.set(
         "open",
