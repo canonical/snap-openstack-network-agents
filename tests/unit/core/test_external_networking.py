@@ -809,10 +809,12 @@ class TestConfigureOvnExternalNetworking:
         # Note: br-ex is ignored because bridge_mapping is provided
         assert "physnet2:" in set_mac_call
 
+    @pytest.mark.parametrize("physnet", ["", "physnet1"])
     def test_empty_mappings(
         self,
         mock_external_networking_deps,
         mock_ovs_cli,
+        physnet,
     ):
         """Test configuration with no mappings."""
         # Setup
@@ -821,8 +823,8 @@ class TestConfigureOvnExternalNetworking:
 
         # Execute
         configure_ovn_external_networking(
-            bridge="",
-            physnet="",
+            bridge=None,
+            physnet=physnet,
             interface="",
             bridge_mapping="",
             enable_chassis_as_gw=False,
@@ -835,6 +837,7 @@ class TestConfigureOvnExternalNetworking:
         mocks["ensure_single_nic_on_bridge"].assert_not_called()
         mocks["ensure_link_up"].assert_not_called()
         mocks["del_external_nics_from_bridge"].assert_not_called()
+        mock_ovs_cli.add_bridge.assert_not_called()
         mock_ovs_cli.set.assert_not_called()
 
     def test_chassis_gateway_disabled(
@@ -1189,10 +1192,27 @@ class TestConfigureOvnExternalNetworking:
         mocks["enable_chassis_as_gateway"].assert_not_called()
         mocks["disable_chassis_as_gateway"].assert_not_called()
 
+    @pytest.mark.parametrize(
+        "bridge, physnet, bridge_mapping, effective_bridge, effective_physnet",
+        [
+            ("br-ex", "physnet1", "", "br-ex", "physnet1"),
+            (None, "physnet1", "", "br-ex", "physnet1"),
+            (None, "physnet1", "br-local:demo", "br-local", "demo"),
+            ("", "physnet1", "", "br-ex", "physnet1"),
+            ("", "physnet1", "br-local:demo", "br-local", "demo"),
+            ("br-custom", "physnet1", "", "br-custom", "physnet1"),
+            ("br-ex", "existing", "", "br-ex", "existing"),
+        ],
+    )
     def test_localnet_mode_single_mapping_success(
         self,
         mock_external_networking_deps,
         mock_ovs_cli,
+        bridge,
+        physnet,
+        bridge_mapping,
+        effective_bridge,
+        effective_physnet,
     ):
         """Test successful localnet mode configuration with single bridge mapping."""
         # Setup
@@ -1201,10 +1221,10 @@ class TestConfigureOvnExternalNetworking:
 
         # Execute - configure localnet with single mapping and external_bridge_address
         configure_ovn_external_networking(
-            bridge="br-ex",
-            physnet="physnet1",
+            bridge=bridge,
+            physnet=physnet,
             interface="",
-            bridge_mapping="",
+            bridge_mapping=bridge_mapping,
             enable_chassis_as_gw=False,  # This should be ignored in localnet mode
             external_bridge_address="10.20.30.1/24",
             ovs_cli=mock_ovs_cli,
@@ -1215,14 +1235,16 @@ class TestConfigureOvnExternalNetworking:
             "open",
             ".",
             "external_ids",
-            {"ovn-bridge-mappings": "physnet1:br-ex"},
+            {"ovn-bridge-mappings": f"{effective_physnet}:{effective_bridge}"},
         )
 
         # Verify bridge is created or waited for
-        mocks["wait_for_interface"].assert_called_once_with("br-ex")
+        mocks["wait_for_interface"].assert_called_once_with(effective_bridge)
 
         # Verify localnet-specific operations are called
-        mocks["add_ip_to_interface"].assert_called_once_with("br-ex", "10.20.30.1/24")
+        mocks["add_ip_to_interface"].assert_called_once_with(
+            effective_bridge, "10.20.30.1/24"
+        )
         mocks["add_iptable_postrouting_rule"].assert_called_once_with(
             "10.20.30.0/24",
             "openstack-network-agents external network rule",

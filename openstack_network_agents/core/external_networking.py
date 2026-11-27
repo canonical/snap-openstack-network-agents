@@ -19,7 +19,10 @@ from openstack_network_agents.core.bridge_datapath import (
     resolve_bridge_mappings,
     resolve_ovs_changes,
 )
-from openstack_network_agents.hooks.common import IPVANYNETWORK_UNSET
+from openstack_network_agents.hooks.common import (
+    IPVANYNETWORK_UNSET,
+    LEGACY_EXTERNAL_BRIDGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +379,7 @@ def configure_ovn_encap_ip(
 
 
 def configure_ovn_external_networking(
-    bridge: str,
+    bridge: str | None,
     physnet: str,
     interface: str,
     bridge_mapping: str,
@@ -397,8 +400,15 @@ def configure_ovn_external_networking(
     """
     logger.info("Configuring OVN external networking.")
 
+    local_access = bool(
+        external_bridge_address and external_bridge_address != IPVANYNETWORK_UNSET
+    )
+    if not bridge and (interface or local_access):
+        # Older callers may configure only the external address or NIC.
+        bridge = LEGACY_EXTERNAL_BRIDGE
+
     mappings = resolve_bridge_mappings(
-        bridge,
+        bridge or "",
         physnet,
         interface,
         bridge_mapping,
@@ -440,7 +450,7 @@ def configure_ovn_external_networking(
         )
         return
 
-    if len(mappings) > 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+    if len(mappings) > 1 and local_access:
         logger.warning(
             "External bridge address configuration is supported only for localnet (i.e. no external nics)."
         )
@@ -531,7 +541,7 @@ def configure_ovn_external_networking(
             _wait_for_interface(mapping.bridge)
 
     comment = "openstack-network-agents external network rule"
-    if len(mappings) == 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+    if len(mappings) == 1 and local_access:
         # We only support localnet mode for a single virtual physnet
         mapping = mappings[0]
         logger.info(f"configuring external bridge {mapping.bridge}")

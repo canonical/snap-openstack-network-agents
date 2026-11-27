@@ -37,7 +37,7 @@ Juju subordinate charm. All keys live under the `network.*` namespace:
 | `network.bridge-mapping` | *(unset)* | Space-separated bridge mappings, typically `bridge:physnet:interface`. |
 | `network.enable-chassis-as-gw` | `true` | Register this chassis as an OVN gateway router. |
 | `network.external-bridge-address` | `0.0.0.0/0` | Static CIDR to assign to the bridge in localnet (single-node) mode. |
-| `network.bridge` | `br-ex` | *(Deprecated)* Single bridge name. Use `network.bridge-mapping` instead. |
+| `network.bridge` | *(unset on new installs)* | *(Deprecated)* Single bridge name. Legacy NIC-only and address-only configuration still defaults to `br-ex`. |
 | `network.physnet` | `physnet1` | *(Deprecated)* Single physnet name. Use `network.bridge-mapping` instead. |
 | `network.interface` | *(unset)* | *(Deprecated)* Single NIC name. Use `network.bridge-mapping` instead. |
 | `logging.debug` | `false` | Enable debug logging for hooks and CLI. |
