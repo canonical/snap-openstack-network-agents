@@ -34,7 +34,7 @@ Juju subordinate charm. All keys live under the `network.*` namespace:
 
 | Key | Default | Description |
 |---|---|---|
-| `network.bridge-mapping` | *(unset)* | Comma-separated `bridge:physnet:interface` triples. This is the **preferred** way to configure mappings. |
+| `network.bridge-mapping` | *(unset)* | Space-separated bridge mappings, typically `bridge:physnet:interface`. |
 | `network.enable-chassis-as-gw` | `true` | Register this chassis as an OVN gateway router. |
 | `network.external-bridge-address` | `0.0.0.0/0` | Static CIDR to assign to the bridge in localnet (single-node) mode. |
 | `network.bridge` | `br-ex` | *(Deprecated)* Single bridge name. Use `network.bridge-mapping` instead. |
@@ -48,6 +48,12 @@ Example:
 sudo snap set openstack-network-agents \
   network.bridge-mapping="br-ex:physnet1:enp6s0"
 ```
+
+Use `br-data:physnet1:bond1:existing` to require that the operator-owned
+OVS bridge has `bond1` attached. Separate multiple expected uplinks with
+commas. Use `br-data:physnet1::existing` to require only the bridge. The
+bridge must already exist. The snap leaves its settings and ports in place
+and does not delete an operator-owned bridge when its mapping is removed.
 
 ## CLI usage
 

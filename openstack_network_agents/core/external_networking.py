@@ -381,7 +381,7 @@ def configure_ovn_external_networking(
     interface: str,
     bridge_mapping: str,
     enable_chassis_as_gw: bool,
-    external_bridge_address: str,
+    external_bridge_address: str | None,
     ovs_cli: OVSCli,
 ) -> None:
     """Configure OVN external networking.
@@ -409,6 +409,19 @@ def configure_ovn_external_networking(
         )
         return
     existing_bridges = ovs_cli.list_bridges()
+    adopted_bridges = {
+        mapping.bridge for mapping in mappings if mapping.require_existing_bridge
+    }
+    if missing := adopted_bridges - set(existing_bridges):
+        raise ValueError(
+            f"Expected existing OVS provider bridge(s): {', '.join(sorted(missing))}"
+        )
+    external_bridge_address = external_bridge_address or IPVANYNETWORK_UNSET
+    if adopted_bridges and external_bridge_address != IPVANYNETWORK_UNSET:
+        raise ValueError(
+            "An adopted provider bridge cannot be used for local networking."
+        )
+
     current_mappings = detect_current_mappings(
         ovs_cli, bridges=existing_bridges, fail_on_error=True
     )
@@ -433,7 +446,21 @@ def configure_ovn_external_networking(
         )
         return
 
+    for mapping in mappings:
+        if not mapping.require_existing_bridge:
+            continue
+        _wait_for_interface(mapping.bridge)
+        if mapping.expected_uplinks:
+            attached = ovs_cli.list_bridge_interfaces(mapping.bridge)
+            if missing_uplinks := set(mapping.expected_uplinks).difference(attached):
+                raise ValueError(
+                    f"OVS bridge {mapping.bridge} is missing expected uplink(s): "
+                    f"{', '.join(sorted(missing_uplinks))}"
+                )
+
     for bridge_name, change in changes["interface_changes"].items():
+        if bridge_name in adopted_bridges:
+            continue
         for iface in change["removed"]:
             # Only remove interfaces that this snap added. Interfaces attached
             # by an operator (e.g. via MAAS/netplan) are not managed by us and
@@ -449,6 +476,14 @@ def configure_ovn_external_networking(
             # Adding interfaces is handled later.
 
     for bridge_name in changes["removed_bridges"]:
+        bridge_ids = ovs_cli.list_table("Bridge", bridge_name, ["external_ids"]).get(
+            "external_ids", {}
+        )
+        if bridge_ids.get("microstack-function") != "ext-bridge":
+            logger.info(
+                "Keeping OVS bridge %s without a snap ownership marker", bridge_name
+            )
+            continue
         # Do not tear down a bridge that still carries operator-managed
         # interfaces (e.g. uplinks/VLANs attached via MAAS/netplan). Deleting
         # the bridge would also destroy those, breaking host connectivity
@@ -458,6 +493,11 @@ def configure_ovn_external_networking(
             logger.warning(
                 f"Skipping removal of ovs bridge {bridge_name}; it still has "
                 f"operator-managed interfaces: {', '.join(unmanaged)}"
+            )
+            continue
+        if ovs_cli.vsctl("list-ports", bridge_name, skip_transaction=True).strip():
+            logger.warning(
+                "Keeping OVS bridge %s because it still has ports", bridge_name
             )
             continue
         logger.info(f"Removing ovs bridge {bridge_name}")
@@ -472,6 +512,7 @@ def configure_ovn_external_networking(
             bridge_name,
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            "external_ids:microstack-function=ext-bridge",
             may_exist=False,
         )
     ovs_cli.set(
@@ -486,7 +527,8 @@ def configure_ovn_external_networking(
     )
 
     for mapping in mappings:
-        _wait_for_interface(mapping.bridge)
+        if not mapping.require_existing_bridge:
+            _wait_for_interface(mapping.bridge)
 
     comment = "openstack-network-agents external network rule"
     if len(mappings) == 1 and external_bridge_address != IPVANYNETWORK_UNSET:
@@ -504,6 +546,8 @@ def configure_ovn_external_networking(
     _delete_iptable_postrouting_rule(comment)
 
     for mapping in mappings:
+        if mapping.require_existing_bridge:
+            continue
         logger.info(f"Resetting external bridge {mapping.bridge} configuration")
         if mapping.interface:
             logger.info(f"Adding {mapping.interface} to {mapping.bridge}")

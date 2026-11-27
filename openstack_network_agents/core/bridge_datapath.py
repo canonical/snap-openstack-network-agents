@@ -26,6 +26,8 @@ class BridgeMapping:
     bridge: str
     physnet: str
     interface: str | None
+    require_existing_bridge: bool = False
+    expected_uplinks: tuple[str, ...] = ()
 
     def physnet_bridge_pair(self) -> str:
         """Return the physnet:bridge pair string."""
@@ -769,7 +771,7 @@ def resolve_bridge_mappings(
 
     seen_physnets: list[str] = []
     seen_bridges: list[str] = []
-    seen_interfaces: list[str] = []
+    seen_interfaces: set[str] = set()
 
     if bridge_mapping:
         for mapping in bridge_mapping.strip().split(" "):
@@ -777,24 +779,45 @@ def resolve_bridge_mappings(
                 # whitespaces only
                 continue
             split = mapping.split(":")
+            require_existing_bridge = len(split) == 4 and split[3] == "existing"
+            expected_uplinks: tuple[str, ...] = ()
             if len(split) == 2:
                 bridge, physnet = split
                 iface = None
             elif len(split) == 3:
                 bridge, physnet, iface = split
+            elif require_existing_bridge:
+                bridge, physnet = split[:2]
+                iface = None
+                if not bridge or not physnet or bridge == INTEGRATION_BRIDGE:
+                    raise ValueError(f"Invalid existing bridge mapping: {mapping}")
+                if split[2]:
+                    expected_uplinks = tuple(split[2].split(","))
+                    if any(
+                        not uplink or uplink == bridge for uplink in expected_uplinks
+                    ):
+                        raise ValueError(f"Invalid existing bridge uplink: {mapping}")
             else:
                 raise ValueError("Invalid mapping format")
             if physnet in seen_physnets:
                 raise ValueError(f"Duplicate physnet in mapping: {physnet}")
             if bridge in seen_bridges:
                 raise ValueError(f"Duplicate bridge in mapping: {bridge}")
-            if iface and iface in seen_interfaces:
-                raise ValueError(f"Duplicate interface in mapping: {iface}")
+            for uplink in (iface,) if iface else expected_uplinks:
+                if uplink in seen_interfaces:
+                    raise ValueError(f"Duplicate interface in mapping: {uplink}")
+                seen_interfaces.add(uplink)
             seen_physnets.append(physnet)
             seen_bridges.append(bridge)
-            if iface:
-                seen_interfaces.append(iface)
-            mappings.append(BridgeMapping(bridge, physnet, iface or None))
+            mappings.append(
+                BridgeMapping(
+                    bridge,
+                    physnet,
+                    iface or None,
+                    require_existing_bridge,
+                    expected_uplinks,
+                )
+            )
     elif external_bridge and physnet_name:
         mappings.append(
             BridgeMapping(external_bridge, physnet_name, external_nic or None)
