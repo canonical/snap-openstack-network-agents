@@ -9,4 +9,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Build snap locally
+        id: snapcraft
         uses: canonical/action-build@v1.3.0
+      - name: Review snap
+        run: |
+          sudo snap install review-tools
+          snap-review --plugs=tools/openstack-network-agents.plugs.data ${{ steps.snapcraft.outputs.snap }}
