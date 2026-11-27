@@ -18,7 +18,6 @@ from openstack_network_agents.core.bridge_datapath import (
     detect_current_mappings,
     resolve_bridge_mappings,
     resolve_ovs_changes,
-    update_mappings_from_rename,
 )
 from openstack_network_agents.hooks.common import IPVANYNETWORK_UNSET
 
@@ -410,12 +409,23 @@ def configure_ovn_external_networking(
         )
         return
     existing_bridges = ovs_cli.list_bridges()
-    current_mappings = detect_current_mappings(ovs_cli, bridges=existing_bridges)
+    current_mappings = detect_current_mappings(
+        ovs_cli, bridges=existing_bridges, fail_on_error=True
+    )
 
     changes = resolve_ovs_changes(current_mappings, mappings)
     logger.debug("OVS external networking changes: %s", changes)
 
-    mappings = update_mappings_from_rename(mappings, changes["renamed_bridges"])
+    if remaps := changes["bridge_remaps"]:
+        logger.warning(
+            "Keeping the current provider network configuration. "
+            "Bridge remaps require a separate cutover: %s",
+            ", ".join(
+                f"{physnet} ({current} -> {requested})"
+                for physnet, (current, requested) in remaps.items()
+            ),
+        )
+        return
 
     if len(mappings) > 1 and external_bridge_address != IPVANYNETWORK_UNSET:
         logger.warning(

@@ -51,7 +51,7 @@ class InterfaceChanges(TypedDict):
 class BridgeResolutionStatus(TypedDict):
     """Status of bridge resolution between old and new configurations."""
 
-    renamed_bridges: list[tuple[str, str]]
+    bridge_remaps: dict[str, tuple[str, str]]
     added_bridges: list[str]
     removed_bridges: list[str]
     interface_changes: dict[str, InterfaceChanges]
@@ -325,14 +325,18 @@ class OVSCli:
 
         return sorted(bridge_ifaces & actual_ifaces)
 
-    def get_bridge_physnet_map(self) -> dict[str, str]:
+    def get_bridge_physnet_map(self, *, fail_on_error: bool = False) -> dict[str, str]:
         """Return a bridge-to-physnet mapping from the global OVS configuration.
+
+        Args:
+            fail_on_error: Raise on a failed read instead of returning an empty map.
 
         Returns:
             Dictionary mapping bridge names to physnet names.
         """
         try:
             raw_value = self.vsctl(
+                "--if-exists",
                 "get",
                 "open",
                 ".",
@@ -340,6 +344,8 @@ class OVSCli:
                 skip_transaction=True,
             )
         except OVSCommandError:
+            if fail_on_error:
+                raise
             return {}
 
         normalized = _normalize_ovs_vsctl_value(raw_value)
@@ -805,20 +811,18 @@ def resolve_ovs_changes(
     """This function outputs a structured status of changes between 2 mappings.
 
     We need to detect:
-      - Renamed bridges (detected by tracking physnet changes,
-                         handled by keeping the existing bridge name)
+      - Physnets requested on a different bridge from their current mapping
       - New bridge
       - Removed bridge
       - Interface removed from which bridge
       - Interface added to which bridge
       - An interface cannot be in 2 bridges
 
-    We use physnet to help detect a bridge rename and handle it smoothly.
-    The physnet is the primary identifier - if the same physnet points to a different
-    bridge name, that's a rename attempt.
+    A requested remap suppresses all other provider changes, since another
+    mapping could move an uplink away from the current bridge.
     """
     status: BridgeResolutionStatus = {
-        "renamed_bridges": [],
+        "bridge_remaps": {},
         "added_bridges": [],
         "removed_bridges": [],
         "interface_changes": {},
@@ -827,6 +831,14 @@ def resolve_ovs_changes(
     # Build physnet-to-bridge mappings for both old and new configs
     prev_physnet_map: dict[str, str] = {m.physnet: m.bridge for m in previous_mapping}
     new_physnet_map: dict[str, str] = {m.physnet: m.bridge for m in new_mapping}
+
+    for physnet in sorted(prev_physnet_map.keys() & new_physnet_map.keys()):
+        current = prev_physnet_map[physnet]
+        requested = new_physnet_map[physnet]
+        if current != requested:
+            status["bridge_remaps"][physnet] = (current, requested)
+    if status["bridge_remaps"]:
+        return status
 
     # Build bridge-to-interface mappings
     prev_bridge_interfaces: dict[str, set[str]] = {}
@@ -843,60 +855,27 @@ def resolve_ovs_changes(
         if m.interface:
             new_bridge_interfaces[m.bridge].add(m.interface)
 
-    # Track all physnets we've seen
-    all_physnets = set(prev_physnet_map.keys()) | set(new_physnet_map.keys())
-
-    # Track which bridges are accounted for
-    renamed_old_bridges = set()
-    renamed_new_bridges = set()
-
-    # Detect renamed bridges by tracking physnet identity
-    for physnet in all_physnets:
-        prev_bridge = prev_physnet_map.get(physnet)
-        new_bridge = new_physnet_map.get(physnet)
-
-        if prev_bridge and new_bridge and prev_bridge != new_bridge:
-            # Same physnet, different bridge name = rename attempt
-            status["renamed_bridges"].append((prev_bridge, new_bridge))
-            renamed_old_bridges.add(prev_bridge)
-            renamed_new_bridges.add(new_bridge)
-
     # Detect removed bridges (existed before, physnet no longer exists)
     prev_bridges = set(prev_physnet_map.values())
     new_bridges = set(new_physnet_map.values())
 
-    removed_bridges = prev_bridges - new_bridges - renamed_old_bridges
+    removed_bridges = prev_bridges - new_bridges
     status["removed_bridges"].extend(sorted(removed_bridges))
 
     # Detect added bridges (new physnet with new bridge)
-    added_bridges = new_bridges - prev_bridges - renamed_new_bridges
+    added_bridges = new_bridges - prev_bridges
     status["added_bridges"].extend(sorted(added_bridges))
 
     # Detect interface changes
-    # For each physnet, compare interfaces between old and new
-    for physnet in all_physnets:
-        prev_bridge = prev_physnet_map.get(physnet)
-        new_bridge = new_physnet_map.get(physnet)
-
-        if not prev_bridge and not new_bridge:
-            continue
-
-        # Use the old bridge name for tracking (since renames aren't supported)
-        # Even for renamed bridges, we track changes under the old bridge name
-        tracking_bridge: str = prev_bridge if prev_bridge else new_bridge  # type: ignore
-
-        prev_interfaces: set[str] = (
-            prev_bridge_interfaces.get(prev_bridge, set()) if prev_bridge else set()
-        )
-        new_interfaces: set[str] = (
-            new_bridge_interfaces.get(new_bridge, set()) if new_bridge else set()
-        )
+    for bridge in sorted(prev_bridges | new_bridges):
+        prev_interfaces = prev_bridge_interfaces.get(bridge, set())
+        new_interfaces = new_bridge_interfaces.get(bridge, set())
 
         removed: set[str] = prev_interfaces - new_interfaces
         added: set[str] = new_interfaces - prev_interfaces
 
         if removed or added:
-            status["interface_changes"][tracking_bridge] = {
+            status["interface_changes"][bridge] = {
                 "removed": sorted(removed),
                 "added": sorted(added),
             }
@@ -904,43 +883,18 @@ def resolve_ovs_changes(
     return status
 
 
-def update_mappings_from_rename(
-    mappings: list[BridgeMapping],
-    renames: list[tuple[str, str]],
-) -> list[BridgeMapping]:
-    """Update bridge mappings based on renames.
-
-    We don't want to recreate the bridges on rename, so we keep the old
-    bridge names in the mappings.
-    """
-    if not renames:
-        return mappings
-
-    rename_dict = {new_name: old_name for old_name, new_name in renames}
-    updated_mappings = []
-    for mapping in mappings:
-        if mapping.bridge not in rename_dict:
-            updated_mappings.append(mapping)
-            continue
-        new_bridge = rename_dict.get(mapping.bridge, mapping.bridge)
-        updated_mappings.append(
-            BridgeMapping(
-                physnet=mapping.physnet,
-                bridge=new_bridge,
-                interface=mapping.interface,
-            )
-        )
-    return updated_mappings
-
-
 def detect_current_mappings(
-    ovs_cli: OVSCli | None = None, *, bridges: list[str] | None = None
+    ovs_cli: OVSCli | None = None,
+    *,
+    bridges: list[str] | None = None,
+    fail_on_error: bool = False,
 ) -> list[BridgeMapping]:
     """Detect current bridge mappings from system configuration.
 
     Args:
         ovs_cli: Optional OVSCli instance to use. If not provided, a new one is created.
         bridges: Existing bridge names, if already read by the caller.
+        fail_on_error: Require a successful read before reconciling OVS state.
 
     Returns:
         List of BridgeMapping objects representing current system state.
@@ -952,6 +906,8 @@ def detect_current_mappings(
         try:
             bridges = ovs_cli.list_bridges()
         except OVSCommandError as exc:
+            if fail_on_error:
+                raise
             logger.warning("Unable to query OVS bridges: %s", exc)
             return []
 
@@ -959,7 +915,7 @@ def detect_current_mappings(
         logger.info("No OVS bridges found while detecting current mappings.")
         return []
 
-    bridge_physnet_map = ovs_cli.get_bridge_physnet_map()
+    bridge_physnet_map = ovs_cli.get_bridge_physnet_map(fail_on_error=fail_on_error)
     mappings: list[BridgeMapping] = []
     seen: set[tuple[str, str, str | None]] = set()
 
@@ -984,6 +940,8 @@ def detect_current_mappings(
         try:
             interfaces = ovs_cli.list_bridge_interfaces(bridge)
         except OVSCommandError as exc:
+            if fail_on_error:
+                raise
             logger.warning("Failed to list interfaces for bridge %s: %s", bridge, exc)
             add_mapping((bridge, physnet, None))
             continue
