@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openstack_network_agents.core.bridge_datapath import OVSCommandError
+from openstack_network_agents.core.bridge_datapath import (
+    BridgeMapping,
+    OVSCommandError,
+    resolve_bridge_mappings,
+    resolve_ovs_changes,
+)
 from openstack_network_agents.core.external_networking import (
     _disable_chassis_as_gateway,
     _enable_chassis_as_gateway,
@@ -22,6 +27,15 @@ from openstack_network_agents.hooks.common import IPVANYNETWORK_UNSET
 MODULE_PATH = "openstack_network_agents.core.external_networking"
 
 
+def test_renaming_physnet_keeps_bridge_uplink():
+    changes = resolve_ovs_changes(
+        [BridgeMapping("br-data", "physnet1", "eth0")],
+        [BridgeMapping("br-data", "physnet2", "eth0")],
+    )
+
+    assert changes["interface_changes"] == {}
+
+
 @pytest.fixture
 def mock_ovs_cli():
     """Create a mock OVSCli instance."""
@@ -30,6 +44,10 @@ def mock_ovs_cli():
     mock.list_bridges.return_value = []
     mock.get_bridge_physnet_map.return_value = {}
     mock.list_bridge_interfaces.return_value = []
+    mock.list_table.return_value = {
+        "external_ids": {"microstack-function": "ext-bridge"}
+    }
+    mock.vsctl.return_value = ""
     return mock
 
 
@@ -382,11 +400,173 @@ class TestConfigureOvnExternalNetworking:
             "br-new1",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            "external_ids:microstack-function=ext-bridge",
+            may_exist=False,
         )
         mock_ovs_cli.add_bridge.assert_any_call(
             "br-new2",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            "external_ids:microstack-function=ext-bridge",
+            may_exist=False,
+        )
+
+    def test_adopt_existing_unmapped_bridge(
+        self,
+        mock_external_networking_deps,
+        mock_ovs_cli,
+    ):
+        """Mapping an existing bridge must preserve its settings and uplink."""
+        mocks = mock_external_networking_deps
+        mocks["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_ovs_cli.list_bridge_interfaces.return_value = ["bond1"]
+
+        configure_ovn_external_networking(
+            bridge="br-ex",
+            physnet="physnet1",
+            interface="",
+            bridge_mapping="br-data:physnet1",
+            enable_chassis_as_gw=True,
+            external_bridge_address=IPVANYNETWORK_UNSET,
+            ovs_cli=mock_ovs_cli,
+        )
+
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_ovs_cli.del_bridge.assert_not_called()
+        mocks["ensure_single_nic_on_bridge"].assert_not_called()
+        mocks["del_interface_from_bridge"].assert_not_called()
+        mock_ovs_cli.set.assert_any_call(
+            "open", ".", "external_ids", {"ovn-bridge-mappings": "physnet1:br-data"}
+        )
+
+    @pytest.mark.parametrize("existing_mapping", [{}, {"br-data": "physnet1"}])
+    @pytest.mark.parametrize("external_address", [IPVANYNETWORK_UNSET, None, ""])
+    def test_adopt_only_preserves_bridge_and_ports(
+        self,
+        mock_external_networking_deps,
+        mock_ovs_cli,
+        existing_mapping,
+        external_address,
+    ):
+        mocks = mock_external_networking_deps
+        mocks["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_ovs_cli.get_bridge_physnet_map.return_value = existing_mapping
+        mock_ovs_cli.list_bridge_interfaces.return_value = ["existing-port"]
+
+        configure_ovn_external_networking(
+            "br-ex",
+            "physnet1",
+            "",
+            "br-data:physnet1::existing",
+            True,
+            external_address,
+            mock_ovs_cli,
+        )
+
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mocks["del_interface_from_bridge"].assert_not_called()
+        mocks["del_external_nics_from_bridge"].assert_not_called()
+        mock_ovs_cli.set.assert_any_call(
+            "open", ".", "external_ids", {"ovn-bridge-mappings": "physnet1:br-data"}
+        )
+
+    @pytest.mark.parametrize("missing_port", [False, True])
+    def test_adoption_checks_declared_ovs_uplinks(
+        self, mock_external_networking_deps, mock_ovs_cli, missing_port
+    ):
+        mock_external_networking_deps["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_ovs_cli.list_bridge_interfaces.return_value = (
+            ["bond1"] if missing_port else ["bond1", "enp9s0"]
+        )
+
+        args = (
+            "br-ex",
+            "physnet1",
+            "",
+            "br-data:physnet1:bond1,enp9s0:existing",
+            True,
+            IPVANYNETWORK_UNSET,
+            mock_ovs_cli,
+        )
+        if missing_port:
+            with pytest.raises(ValueError, match="br-data.*enp9s0"):
+                configure_ovn_external_networking(*args)
+            mock_ovs_cli.set.assert_not_called()
+        else:
+            configure_ovn_external_networking(*args)
+            mock_ovs_cli.set.assert_any_call(
+                "open", ".", "external_ids", {"ovn-bridge-mappings": "physnet1:br-data"}
+            )
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_external_networking_deps["ensure_single_nic_on_bridge"].assert_not_called()
+
+    def test_reusing_an_adopted_uplink_in_another_mapping_fails(self):
+        with pytest.raises(ValueError, match="Duplicate interface.*bond1"):
+            resolve_bridge_mappings(
+                "", "", "", "br-data:physnet1:bond1:existing br-other:physnet2:bond1"
+            )
+
+    def test_adopt_only_requires_an_existing_bridge(self, mock_ovs_cli):
+        with pytest.raises(
+            ValueError, match="Expected existing OVS provider bridge.*br-data"
+        ):
+            configure_ovn_external_networking(
+                "br-ex",
+                "physnet1",
+                "",
+                "br-data:physnet1::existing",
+                True,
+                IPVANYNETWORK_UNSET,
+                mock_ovs_cli,
+            )
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_ovs_cli.set.assert_not_called()
+
+    def test_adopt_only_waits_for_bridge_link_before_mapping(
+        self, mock_external_networking_deps, mock_ovs_cli
+    ):
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_external_networking_deps["wait_for_interface"].side_effect = TimeoutError(
+            "br-data is unavailable"
+        )
+
+        with pytest.raises(TimeoutError, match="br-data is unavailable"):
+            configure_ovn_external_networking(
+                "br-ex",
+                "physnet1",
+                "",
+                "br-data:physnet1::existing",
+                True,
+                IPVANYNETWORK_UNSET,
+                mock_ovs_cli,
+            )
+
+        mock_ovs_cli.set.assert_not_called()
+
+    def test_unmapping_an_operator_bridge_keeps_the_bridge(
+        self, mock_external_networking_deps, mock_ovs_cli
+    ):
+        mock_external_networking_deps["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = ["br-data"]
+        mock_ovs_cli.get_bridge_physnet_map.return_value = {"br-data": "physnet1"}
+        mock_ovs_cli.list_table.return_value = {"external_ids": {}}
+
+        configure_ovn_external_networking(
+            "br-ex",
+            "physnet1",
+            "",
+            "br-new:physnet2",
+            True,
+            IPVANYNETWORK_UNSET,
+            mock_ovs_cli,
+        )
+
+        mock_ovs_cli.del_bridge.assert_not_called()
+        mock_ovs_cli.set.assert_any_call(
+            "open", ".", "external_ids", {"ovn-bridge-mappings": "physnet2:br-new"}
         )
 
     def test_interface_removal_from_bridge(
@@ -495,38 +675,44 @@ class TestConfigureOvnExternalNetworking:
             mock_ovs_cli, "br-ex", "eth1"
         )
 
-    def test_bridge_renaming(
+    @pytest.mark.parametrize(
+        "bridges", [["br-ex"], ["br-ex", "br-data"]], ids=["missing", "existing"]
+    )
+    def test_bridge_remap_preserves_effective_configuration(
         self,
         mock_external_networking_deps,
         mock_ovs_cli,
+        caplog,
+        bridges,
     ):
-        """Test that mappings are updated when bridges are renamed."""
-        # Setup
+        """A conflicting bridge name must leave the live datapath alone."""
         mocks = mock_external_networking_deps
         mocks["get_machine_id"].return_value = "test-machine-id"
+        mock_ovs_cli.list_bridges.return_value = bridges
+        mock_ovs_cli.get_bridge_physnet_map.return_value = {"br-ex": "physnet1"}
+        mock_ovs_cli.list_bridge_interfaces.return_value = ["eth0", "bond0"]
+        mocks["is_managed_port"].side_effect = lambda _ovs, port: port == "eth0"
 
-        # Simulate existing state: br-ex-old exists for physnet1
-        mock_ovs_cli.list_bridges.return_value = ["br-ex-old"]
-        mock_ovs_cli.get_bridge_physnet_map.return_value = {"br-ex-old": "physnet1"}
-        mock_ovs_cli.list_bridge_interfaces.return_value = ["eth0"]
-
-        # Execute - configure br-ex for physnet1 (rename)
         configure_ovn_external_networking(
             bridge="br-ex",
             physnet="physnet1",
-            interface="eth0",
-            bridge_mapping="",
-            enable_chassis_as_gw=True,
+            interface="",
+            bridge_mapping="br-data:physnet1:eth1 br-new:physnet2",
+            enable_chassis_as_gw=False,
             external_bridge_address=IPVANYNETWORK_UNSET,
             ovs_cli=mock_ovs_cli,
         )
 
-        # Verify the renamed mappings are used for bridge configuration
-        # The refactored code uses renamed bridges from mappings
-        mocks["wait_for_interface"].assert_called_once_with("br-ex-old")
-        mocks["ensure_single_nic_on_bridge"].assert_called_once_with(
-            mock_ovs_cli, "br-ex-old", "eth0"
-        )
+        mocks["del_interface_from_bridge"].assert_not_called()
+        mocks["ensure_single_nic_on_bridge"].assert_not_called()
+        mocks["del_external_nics_from_bridge"].assert_not_called()
+        mocks["ensure_link_up"].assert_not_called()
+        mocks["delete_iptable_postrouting_rule"].assert_not_called()
+        mocks["disable_chassis_as_gateway"].assert_not_called()
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_ovs_cli.del_bridge.assert_not_called()
+        mock_ovs_cli.set.assert_not_called()
+        assert "br-ex -> br-data" in caplog.text
 
     def test_multiple_mappings(
         self,
@@ -623,10 +809,12 @@ class TestConfigureOvnExternalNetworking:
         # Note: br-ex is ignored because bridge_mapping is provided
         assert "physnet2:" in set_mac_call
 
+    @pytest.mark.parametrize("physnet", ["", "physnet1"])
     def test_empty_mappings(
         self,
         mock_external_networking_deps,
         mock_ovs_cli,
+        physnet,
     ):
         """Test configuration with no mappings."""
         # Setup
@@ -635,8 +823,8 @@ class TestConfigureOvnExternalNetworking:
 
         # Execute
         configure_ovn_external_networking(
-            bridge="",
-            physnet="",
+            bridge=None,
+            physnet=physnet,
             interface="",
             bridge_mapping="",
             enable_chassis_as_gw=False,
@@ -649,6 +837,7 @@ class TestConfigureOvnExternalNetworking:
         mocks["ensure_single_nic_on_bridge"].assert_not_called()
         mocks["ensure_link_up"].assert_not_called()
         mocks["del_external_nics_from_bridge"].assert_not_called()
+        mock_ovs_cli.add_bridge.assert_not_called()
         mock_ovs_cli.set.assert_not_called()
 
     def test_chassis_gateway_disabled(
@@ -722,6 +911,8 @@ class TestConfigureOvnExternalNetworking:
             "br-new",
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            "external_ids:microstack-function=ext-bridge",
+            may_exist=False,
         )
 
     def test_multiple_interface_changes_on_multiple_bridges(
@@ -905,6 +1096,37 @@ class TestConfigureOvnExternalNetworking:
             mock_ovs_cli, "br-ex"
         )
 
+    @pytest.mark.parametrize(
+        "read_method",
+        ["list_bridges", "get_bridge_physnet_map", "list_bridge_interfaces"],
+    )
+    def test_cannot_apply_when_existing_ovs_state_is_unavailable(
+        self, mock_ovs_cli, read_method
+    ):
+        """A failed read must never be treated as an empty configuration."""
+        mock_ovs_cli.list_bridges.return_value = ["br-ex"]
+        mock_ovs_cli.get_bridge_physnet_map.return_value = {"br-ex": "physnet1"}
+        getattr(mock_ovs_cli, read_method).side_effect = OVSCommandError(
+            "Cannot read OVS state"
+        )
+
+        with pytest.raises(OVSCommandError, match="Cannot read OVS state"):
+            configure_ovn_external_networking(
+                bridge="br-data",
+                physnet="physnet1",
+                interface="eth1",
+                bridge_mapping="",
+                enable_chassis_as_gw=True,
+                external_bridge_address=IPVANYNETWORK_UNSET,
+                ovs_cli=mock_ovs_cli,
+            )
+
+        mock_ovs_cli.add_bridge.assert_not_called()
+        mock_ovs_cli.del_bridge.assert_not_called()
+        mock_ovs_cli.add_port.assert_not_called()
+        mock_ovs_cli.del_port.assert_not_called()
+        mock_ovs_cli.set.assert_not_called()
+
     def test_ovs_failure(
         self,
         mock_external_networking_deps,
@@ -970,10 +1192,27 @@ class TestConfigureOvnExternalNetworking:
         mocks["enable_chassis_as_gateway"].assert_not_called()
         mocks["disable_chassis_as_gateway"].assert_not_called()
 
+    @pytest.mark.parametrize(
+        "bridge, physnet, bridge_mapping, effective_bridge, effective_physnet",
+        [
+            ("br-ex", "physnet1", "", "br-ex", "physnet1"),
+            (None, "physnet1", "", "br-ex", "physnet1"),
+            (None, "physnet1", "br-local:demo", "br-local", "demo"),
+            ("", "physnet1", "", "br-ex", "physnet1"),
+            ("", "physnet1", "br-local:demo", "br-local", "demo"),
+            ("br-custom", "physnet1", "", "br-custom", "physnet1"),
+            ("br-ex", "existing", "", "br-ex", "existing"),
+        ],
+    )
     def test_localnet_mode_single_mapping_success(
         self,
         mock_external_networking_deps,
         mock_ovs_cli,
+        bridge,
+        physnet,
+        bridge_mapping,
+        effective_bridge,
+        effective_physnet,
     ):
         """Test successful localnet mode configuration with single bridge mapping."""
         # Setup
@@ -982,10 +1221,10 @@ class TestConfigureOvnExternalNetworking:
 
         # Execute - configure localnet with single mapping and external_bridge_address
         configure_ovn_external_networking(
-            bridge="br-ex",
-            physnet="physnet1",
+            bridge=bridge,
+            physnet=physnet,
             interface="",
-            bridge_mapping="",
+            bridge_mapping=bridge_mapping,
             enable_chassis_as_gw=False,  # This should be ignored in localnet mode
             external_bridge_address="10.20.30.1/24",
             ovs_cli=mock_ovs_cli,
@@ -996,14 +1235,16 @@ class TestConfigureOvnExternalNetworking:
             "open",
             ".",
             "external_ids",
-            {"ovn-bridge-mappings": "physnet1:br-ex"},
+            {"ovn-bridge-mappings": f"{effective_physnet}:{effective_bridge}"},
         )
 
         # Verify bridge is created or waited for
-        mocks["wait_for_interface"].assert_called_once_with("br-ex")
+        mocks["wait_for_interface"].assert_called_once_with(effective_bridge)
 
         # Verify localnet-specific operations are called
-        mocks["add_ip_to_interface"].assert_called_once_with("br-ex", "10.20.30.1/24")
+        mocks["add_ip_to_interface"].assert_called_once_with(
+            effective_bridge, "10.20.30.1/24"
+        )
         mocks["add_iptable_postrouting_rule"].assert_called_once_with(
             "10.20.30.0/24",
             "openstack-network-agents external network rule",

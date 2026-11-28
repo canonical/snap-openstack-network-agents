@@ -7,6 +7,18 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from openstack_network_agents.hooks import configure
+from openstack_network_agents.hooks.common import update_default_config
+
+
+def test_defaults_do_not_create_an_implicit_external_bridge():
+    snap = Mock()
+    snap.config.get_options.return_value = {}
+
+    update_default_config(snap)
+
+    defaults = snap.config.set.call_args.args[0]
+    assert "network.bridge" not in defaults
+    assert defaults["network.physnet"] == "physnet1"
 
 
 @pytest.mark.parametrize(

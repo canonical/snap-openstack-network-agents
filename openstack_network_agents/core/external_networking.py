@@ -18,9 +18,11 @@ from openstack_network_agents.core.bridge_datapath import (
     detect_current_mappings,
     resolve_bridge_mappings,
     resolve_ovs_changes,
-    update_mappings_from_rename,
 )
-from openstack_network_agents.hooks.common import IPVANYNETWORK_UNSET
+from openstack_network_agents.hooks.common import (
+    IPVANYNETWORK_UNSET,
+    LEGACY_EXTERNAL_BRIDGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -377,12 +379,12 @@ def configure_ovn_encap_ip(
 
 
 def configure_ovn_external_networking(
-    bridge: str,
+    bridge: str | None,
     physnet: str,
     interface: str,
     bridge_mapping: str,
     enable_chassis_as_gw: bool,
-    external_bridge_address: str,
+    external_bridge_address: str | None,
     ovs_cli: OVSCli,
 ) -> None:
     """Configure OVN external networking.
@@ -398,8 +400,15 @@ def configure_ovn_external_networking(
     """
     logger.info("Configuring OVN external networking.")
 
+    local_access = bool(
+        external_bridge_address and external_bridge_address != IPVANYNETWORK_UNSET
+    )
+    if not bridge and (interface or local_access):
+        # Older callers may configure only the external address or NIC.
+        bridge = LEGACY_EXTERNAL_BRIDGE
+
     mappings = resolve_bridge_mappings(
-        bridge,
+        bridge or "",
         physnet,
         interface,
         bridge_mapping,
@@ -409,20 +418,59 @@ def configure_ovn_external_networking(
             "No valid bridge mappings found; skipping external network configuration."
         )
         return
-    current_mappings = detect_current_mappings(ovs_cli)
+    existing_bridges = ovs_cli.list_bridges()
+    adopted_bridges = {
+        mapping.bridge for mapping in mappings if mapping.require_existing_bridge
+    }
+    if missing := adopted_bridges - set(existing_bridges):
+        raise ValueError(
+            f"Expected existing OVS provider bridge(s): {', '.join(sorted(missing))}"
+        )
+    external_bridge_address = external_bridge_address or IPVANYNETWORK_UNSET
+    if adopted_bridges and external_bridge_address != IPVANYNETWORK_UNSET:
+        raise ValueError(
+            "An adopted provider bridge cannot be used for local networking."
+        )
+
+    current_mappings = detect_current_mappings(
+        ovs_cli, bridges=existing_bridges, fail_on_error=True
+    )
 
     changes = resolve_ovs_changes(current_mappings, mappings)
     logger.debug("OVS external networking changes: %s", changes)
 
-    mappings = update_mappings_from_rename(mappings, changes["renamed_bridges"])
+    if remaps := changes["bridge_remaps"]:
+        logger.warning(
+            "Keeping the current provider network configuration. "
+            "Bridge remaps require a separate cutover: %s",
+            ", ".join(
+                f"{physnet} ({current} -> {requested})"
+                for physnet, (current, requested) in remaps.items()
+            ),
+        )
+        return
 
-    if len(mappings) > 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+    if len(mappings) > 1 and local_access:
         logger.warning(
             "External bridge address configuration is supported only for localnet (i.e. no external nics)."
         )
         return
 
+    for mapping in mappings:
+        if not mapping.require_existing_bridge:
+            continue
+        _wait_for_interface(mapping.bridge)
+        if mapping.expected_uplinks:
+            attached = ovs_cli.list_bridge_interfaces(mapping.bridge)
+            if missing_uplinks := set(mapping.expected_uplinks).difference(attached):
+                raise ValueError(
+                    f"OVS bridge {mapping.bridge} is missing expected uplink(s): "
+                    f"{', '.join(sorted(missing_uplinks))}"
+                )
+
     for bridge_name, change in changes["interface_changes"].items():
+        if bridge_name in adopted_bridges:
+            continue
         for iface in change["removed"]:
             # Only remove interfaces that this snap added. Interfaces attached
             # by an operator (e.g. via MAAS/netplan) are not managed by us and
@@ -438,6 +486,14 @@ def configure_ovn_external_networking(
             # Adding interfaces is handled later.
 
     for bridge_name in changes["removed_bridges"]:
+        bridge_ids = ovs_cli.list_table("Bridge", bridge_name, ["external_ids"]).get(
+            "external_ids", {}
+        )
+        if bridge_ids.get("microstack-function") != "ext-bridge":
+            logger.info(
+                "Keeping OVS bridge %s without a snap ownership marker", bridge_name
+            )
+            continue
         # Do not tear down a bridge that still carries operator-managed
         # interfaces (e.g. uplinks/VLANs attached via MAAS/netplan). Deleting
         # the bridge would also destroy those, breaking host connectivity
@@ -449,15 +505,25 @@ def configure_ovn_external_networking(
                 f"operator-managed interfaces: {', '.join(unmanaged)}"
             )
             continue
+        if ovs_cli.vsctl("list-ports", bridge_name, skip_transaction=True).strip():
+            logger.warning(
+                "Keeping OVS bridge %s because it still has ports", bridge_name
+            )
+            continue
         logger.info(f"Removing ovs bridge {bridge_name}")
         ovs_cli.del_bridge(bridge_name)
 
     for bridge_name in changes["added_bridges"]:
+        if bridge_name in existing_bridges:
+            logger.info("Using existing OVS bridge %s", bridge_name)
+            continue
         logger.info(f"Adding ovs bridge {bridge_name}")
         ovs_cli.add_bridge(
             bridge_name,
             "system",
             "protocols=OpenFlow13,OpenFlow15",
+            "external_ids:microstack-function=ext-bridge",
+            may_exist=False,
         )
     ovs_cli.set(
         "open",
@@ -471,10 +537,11 @@ def configure_ovn_external_networking(
     )
 
     for mapping in mappings:
-        _wait_for_interface(mapping.bridge)
+        if not mapping.require_existing_bridge:
+            _wait_for_interface(mapping.bridge)
 
     comment = "openstack-network-agents external network rule"
-    if len(mappings) == 1 and external_bridge_address != IPVANYNETWORK_UNSET:
+    if len(mappings) == 1 and local_access:
         # We only support localnet mode for a single virtual physnet
         mapping = mappings[0]
         logger.info(f"configuring external bridge {mapping.bridge}")
@@ -489,6 +556,8 @@ def configure_ovn_external_networking(
     _delete_iptable_postrouting_rule(comment)
 
     for mapping in mappings:
+        if mapping.require_existing_bridge:
+            continue
         logger.info(f"Resetting external bridge {mapping.bridge} configuration")
         if mapping.interface:
             logger.info(f"Adding {mapping.interface} to {mapping.bridge}")

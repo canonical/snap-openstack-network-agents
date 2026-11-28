@@ -9,13 +9,14 @@ from snaphelpers import Snap
 logger = logging.getLogger(__name__)
 
 UNSET = ""
+LEGACY_EXTERNAL_BRIDGE = "br-ex"
 IPVANYNETWORK_UNSET = "0.0.0.0/0"
 DEFAULT_CONFIG = {
     "logging.debug": "false",
     # Deprecated
     "network.interface": UNSET,
     # Deprecated
-    "network.bridge": "br-ex",
+    "network.bridge": UNSET,
     # Deprecated
     "network.physnet": "physnet1",
     "network.bridge-mapping": UNSET,
